@@ -61,6 +61,11 @@ android {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
         }
+        // fork tweak: kompres .so ffmpeg di dalam APK (~52MB -> ~31MB)
+        // supaya APK-nya bisa dikirim lewat Telegram (limit bot 50MB).
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     splits {
