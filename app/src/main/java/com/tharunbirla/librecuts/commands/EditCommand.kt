@@ -45,7 +45,15 @@ class RemoveOperationCommand(
  */
 class ReplaceUniqueOperationCommand(
     private val newOperation: EditOperation,
-    override val description: String = "Modify Timeline"
+    override val description: String = "Modify Timeline",
+    /**
+     * Drop the cached reframe playback proxy while applying this change.
+     *
+     * Speed and reverse rebuild the clip's playback source, so a reframe proxy rendered from
+     * the previous source would show frames that no longer match the timeline. The reframe
+     * itself is not lost: it is re-rendered from the new source when the user re-applies it.
+     */
+    private val invalidatesReframeProxy: Boolean = false
 ) : EditCommand() {
     override fun execute(project: VideoProject): VideoProject {
         val ops = project.operations.toMutableList()
@@ -61,7 +69,11 @@ class ReplaceUniqueOperationCommand(
         } else {
             ops.add(newOperation)
         }
-        return project.copy(operations = ops, lastModifiedAt = System.currentTimeMillis())
+        return project.copy(
+            operations = ops,
+            reframeProxyUri = if (invalidatesReframeProxy) null else project.reframeProxyUri,
+            lastModifiedAt = System.currentTimeMillis()
+        )
     }
 }
 

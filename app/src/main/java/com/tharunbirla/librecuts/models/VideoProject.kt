@@ -12,6 +12,13 @@ data class VideoProject(
     val sourceUri: Uri,
     val sourceName: String,
     val scrubProxyUri: Uri? = null,
+    /**
+     * Playback-only proxy of the main clip with the reframe (pan/zoom) already baked in.
+     *
+     * Mirrors [EditOperation.MergeItem.reframeProxyUri] for the clip that is not part of a
+     * merge; export ignores it and applies the filter to the original source instead.
+     */
+    val reframeProxyUri: Uri? = null,
     val operations: List<EditOperation> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
     val lastModifiedAt: Long = System.currentTimeMillis()

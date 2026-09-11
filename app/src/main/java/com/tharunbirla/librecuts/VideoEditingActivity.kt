@@ -464,6 +464,16 @@ class VideoEditingActivity : AppCompatActivity() {
 
     // Segmented preview state
     private var previewJob: Job? = null
+    /** Background render of the reframe playback proxy for the selected clip. */
+    private var reframeProxyJob: Job? = null
+    /** Last reframe proxy written, deleted when a newer one replaces it. */
+    private var lastReframeProxyFile: File? = null
+    /**
+     * Above this length a reframe proxy is skipped: re-encoding a long clip would cost far
+     * more storage than the user's device has to spare, so the preview carries the effect and
+     * export still applies the full transform.
+     */
+    private val reframeProxyMaxDurationMs = 120_000L
     private var isShowingPreview = false
     private var isRenderingPreview = false
     private var previewFile: File? = null
@@ -2981,7 +2991,7 @@ class VideoEditingActivity : AppCompatActivity() {
         val cropH = (crop?.hFraction ?: 1f).coerceAtLeast(0.01f)
 
         val marker = overlay.getMarkerBounds()
-        val selection = com.tharunbirla.librecuts.services.ObjectTrackingService.Selection(
+        val selection = com.tharunbirla.librecuts.services.tracking.TrackingSelection(
             left = cropX + marker[0] * cropW,
             top = cropY + marker[1] * cropH,
             width = marker[2] * cropW,
@@ -3005,7 +3015,7 @@ class VideoEditingActivity : AppCompatActivity() {
             val result = try {
                 com.tharunbirla.librecuts.services.ObjectTrackingService.track(
                     context = this@VideoEditingActivity,
-                    request = com.tharunbirla.librecuts.services.ObjectTrackingService.Request(
+                    request = com.tharunbirla.librecuts.services.tracking.TrackingRequest(
                         videoUri = videoUri,
                         startTimeMs = range.first,
                         endTimeMs = range.second,
@@ -3067,6 +3077,195 @@ class VideoEditingActivity : AppCompatActivity() {
         )
         exitTrackingEditingMode()
         Toast.makeText(this, R.string.tracking_applied, Toast.LENGTH_SHORT).show()
+        // Whatever reframe proxy exists was baked from an older track, so drop it before the
+        // ratio choice decides what to render next.
+        viewModel.setReframeProxyUri(selectedVideoIndex ?: 0, null)
+        promptReframeRatio()
+    }
+
+    /**
+     * Ask which canvas the reframe should target.
+     *
+     * The choice decides how the frame is allowed to *move*, not just its shape: 9:16 keeps
+     * the full height and slides sideways, 16:9 keeps the canvas and zooms/pans to follow.
+     */
+    private fun promptReframeRatio() {
+        val labels = arrayOf(
+            getString(R.string.reframe_ratio_tiktok),
+            getString(R.string.reframe_ratio_youtube),
+            getString(R.string.reframe_ratio_original)
+        )
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.reframe_ratio_title)
+            .setItems(labels) { _, which ->
+                val spec = when (which) {
+                    0 -> com.tharunbirla.librecuts.models.ReframeSpec.TIKTOK
+                    1 -> com.tharunbirla.librecuts.models.ReframeSpec.YOUTUBE
+                    else -> com.tharunbirla.librecuts.models.ReframeSpec.ORIGINAL
+                }
+                applyReframeSpec(spec, labels[which])
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Commit the framing choice and put it on the timeline right away.
+     *
+     * Two renders run on purpose: the preview puts the effect on screen now, while the
+     * playback proxy bakes it into the clip so playback and scrubbing show it too. Export
+     * ignores the proxy and applies the same plan to the original source, so the transform
+     * is never applied twice.
+     */
+    private fun applyReframeSpec(
+        spec: com.tharunbirla.librecuts.models.ReframeSpec,
+        label: String
+    ) {
+        val trackOp = viewModel.project.value?.operations
+            ?.filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.TrackObject>()
+            ?.lastOrNull() ?: return
+        // The toolbar zoom is intentionally preserved: 0 means "auto", and a value the user
+        // picked by hand (x1.5/x2/x3) should survive the ratio choice. The planner ignores it
+        // for the pan-only 9:16 preset, where a locked height leaves nothing to zoom into.
+        viewModel.updateOperation(trackOp.copy(spec = spec))
+        Toast.makeText(this, getString(R.string.reframe_applied, label), Toast.LENGTH_SHORT).show()
+        renderSegmentedPreview()
+        renderReframeProxy()
+    }
+
+    /** Timeline offset where clip [index] starts, in ms. */
+    private fun clipStartOffsetMs(index: Int, project: VideoProject): Long {
+        if (index <= 0) return 0L
+        val merge = project.operations
+            .filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Merge>()
+            .lastOrNull() ?: return 0L
+        var offset = 0L
+        val count = (index - 1).coerceAtMost(merge.items.size)
+        for (i in 0 until count) {
+            offset += merge.items[i].trimmedDurationMs
+        }
+        return offset
+    }
+
+    /** Display-oriented size of a file, used to size the reframe window. */
+    private fun probeVideoDims(path: String): Pair<Int, Int> {
+        return try {
+            val retriever = android.media.MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(path)
+                val w = retriever
+                    .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                    ?.toIntOrNull() ?: 0
+                val h = retriever
+                    .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                    ?.toIntOrNull() ?: 0
+                val rotation = retriever
+                    .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                    ?.toIntOrNull() ?: 0
+                if (rotation == 90 || rotation == 270) Pair(h, w) else Pair(w, h)
+            } finally {
+                retriever.release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "probeVideoDims failed: ${e.message}")
+            Pair(0, 0)
+        }
+    }
+
+    /**
+     * Render a playback proxy of the selected clip with the reframe baked in.
+     *
+     * This is what makes "Apply" land on the timeline instead of only in the exported file:
+     * the proxy replaces the clip's source for ExoPlayer (see the media-source selection in
+     * performRenderTracks) and is dropped again whenever that source changes.
+     */
+    private fun renderReframeProxy() {
+        val index = selectedVideoIndex ?: 0
+        val project = viewModel.project.value ?: return
+        val trackOp = project.operations
+            .filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.TrackObject>()
+            .lastOrNull() ?: return
+        if (!trackOp.hasPath()) return
+        val item = getSequenceItems().getOrNull(index) ?: return
+
+        reframeProxyJob?.cancel()
+        reframeProxyJob = lifecycleScope.launch {
+            // Prefer the clip's existing playback proxy: the reframe must land on top of the
+            // speed/reverse version, not on the raw file those were derived from.
+            val playbackProxy = item.proxyUri
+            val sourcePath = (playbackProxy?.let { getFilePathFromUri(it) })
+                ?: getFilePathFromUri(item.uri)
+            if (sourcePath.isNullOrEmpty()) {
+                Toast.makeText(this@VideoEditingActivity, R.string.reframe_failed, Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            val sourceStartMs = if (playbackProxy != null) 0L else item.trimStartMs
+            val durationMs = if (playbackProxy != null) {
+                item.trimmedDurationMs
+            } else {
+                item.trimEndMs - item.trimStartMs
+            }
+            if (durationMs <= 0L) return@launch
+            if (durationMs > reframeProxyMaxDurationMs) {
+                Toast.makeText(this@VideoEditingActivity, R.string.reframe_preview_only, Toast.LENGTH_LONG).show()
+                return@launch
+            }
+
+            val (srcW, srcH) = probeVideoDims(sourcePath)
+            if (srcW <= 0 || srcH <= 0) {
+                Toast.makeText(this@VideoEditingActivity, R.string.reframe_failed, Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            val spec = if (trackOp.zoom > 0f) {
+                trackOp.reframeSpec().copy(zoom = trackOp.zoom)
+            } else {
+                trackOp.reframeSpec()
+            }
+            val keyframes = trackOp.path.map {
+                com.tharunbirla.librecuts.services.reframe.ReframeKeyframe(it.timeMs, it.valueX, it.valueY)
+            }
+            // Playback of this clip starts at its first frame, so pull the timeline-based
+            // keyframes back by the clip's offset; the filter's `t` then starts at zero.
+            val plan = com.tharunbirla.librecuts.services.reframe.ReframePlanner.plan(
+                sourceWidth = srcW,
+                sourceHeight = srcH,
+                spec = spec,
+                keyframes = keyframes,
+                timeOffsetMs = -clipStartOffsetMs(index, project)
+            )
+            val (proxyW, proxyH) = com.tharunbirla.librecuts.services.reframe.ReframeFilterBuilder
+                .proxyCanvas(plan)
+            val filter = com.tharunbirla.librecuts.services.reframe.ReframeFilterBuilder
+                .build(plan, proxyW, proxyH)
+            if (filter == null) return@launch
+
+            val output = File(cacheDir, "proxy_reframe_${System.currentTimeMillis()}.mp4")
+            showLoading(getString(R.string.reframe_rendering))
+            val command = com.tharunbirla.librecuts.services.reframe.ReframeFilterBuilder.buildProxyCommand(
+                sourcePath = sourcePath,
+                filter = filter,
+                startMs = sourceStartMs,
+                durationMs = durationMs,
+                outputPath = output.absolutePath
+            )
+            val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                ffmpegEngine.executeCommand(command)
+            }
+            hideLoading()
+
+            if (result is FFmpegRenderEngine.RenderResult.Success && output.exists()) {
+                val previous = lastReframeProxyFile
+                viewModel.setReframeProxyUri(index, android.net.Uri.fromFile(output))
+                lastReframeProxyFile = output
+                if (previous != null && previous.absolutePath != output.absolutePath) {
+                    previous.delete()
+                }
+                viewModel.project.value?.let { renderTracks(it) }
+            } else {
+                Toast.makeText(this@VideoEditingActivity, R.string.reframe_failed, Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     /** Source URI backing the selected clip (base video, or the merged item). */
@@ -4404,7 +4603,17 @@ class VideoEditingActivity : AppCompatActivity() {
         val project = viewModel.project.value ?: return
         val currentMergeOp = project.operations.find { it is com.tharunbirla.librecuts.models.EditOperation.Merge } as? com.tharunbirla.librecuts.models.EditOperation.Merge ?: return
         val updatedItems = currentMergeOp.items.toMutableList()
-        updatedItems[index - 1] = newItem
+        if (index - 1 !in updatedItems.indices) return
+        val previous = updatedItems[index - 1]
+        // A reframe proxy is rendered from the clip's playback source. When that source
+        // changes — speed, reverse, trim, or a new speed proxy — the baked-in frames no
+        // longer match the timeline, so the cache has to go rather than play stale video.
+        val sourceChanged = previous.proxyUri != newItem.proxyUri ||
+                previous.speed != newItem.speed ||
+                previous.isReversed != newItem.isReversed ||
+                previous.trimStartMs != newItem.trimStartMs ||
+                previous.trimEndMs != newItem.trimEndMs
+        updatedItems[index - 1] = if (sourceChanged) newItem.copy(reframeProxyUri = null) else newItem
         val newMergeOp = currentMergeOp.copy(items = updatedItems)
         viewModel.updateOperation(newMergeOp)
         viewModel.project.value?.let { renderTracks(it) }
@@ -5579,6 +5788,7 @@ class VideoEditingActivity : AppCompatActivity() {
             isMirrored = isMirrored,
             proxyUri = proxyUri,
             scrubProxyUri = viewModel.project.value?.scrubProxyUri,
+            reframeProxyUri = viewModel.project.value?.reframeProxyUri,
             maskConfig = maskConfig,
             isImage = isMainImg
         ))
@@ -6257,7 +6467,14 @@ class VideoEditingActivity : AppCompatActivity() {
                     
                     val clipStartUs: Long
                     val videoUri: Uri
-                    if (item.proxyUri != null) {
+                    if (item.reframeProxyUri != null) {
+                        // Reframed playback proxy: pan/zoom is already baked in and the file
+                        // starts at the clip's first frame, so the offset maps directly.
+                        // Checked first because it is the furthest stage downstream — when a
+                        // speed proxy exists too, the reframe was rendered from it.
+                        clipStartUs = offsetInVideoMs * 1000L
+                        videoUri = item.reframeProxyUri
+                    } else if (item.proxyUri != null) {
                         clipStartUs = offsetInVideoMs * 1000L
                         videoUri = item.proxyUri
                     } else if (item.scrubProxyUri != null) {
