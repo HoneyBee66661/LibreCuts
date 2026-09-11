@@ -61,6 +61,12 @@ android {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
         }
+        // Fork tweak: store the ffmpeg .so files compressed inside the APK (~52MB -> ~31MB),
+        // which keeps the artifact small enough to hand around. Without it the debug APK is
+        // ~64MB, which matters on a phone with little free storage.
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     splits {
