@@ -234,6 +234,14 @@ fun VideoEditingViewModel.addOperation(operation: EditOperation) {
     executeCommand(AddOperationCommand(operation, "Add Effect"))
 }
 
+/**
+ * Add an object-tracking (pan/zoom) result for the selected clip. Runs through the same
+ * command stack as every other edit, so it is undoable.
+ */
+fun VideoEditingViewModel.addTrackObjectOperation(operation: EditOperation.TrackObject) {
+    executeCommand(AddOperationCommand(operation, "Track Object"))
+}
+
 fun VideoEditingViewModel.updateOperation(updatedOp: EditOperation) {
     executeCommand(UpdateOperationCommand(updatedOp.id, "Modify Effect") { updatedOp })
 }
