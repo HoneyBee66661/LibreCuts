@@ -8,11 +8,25 @@ package com.tharunbirla.librecuts.models
  * which is the "just follow the subject, don't change my frame" case.
  */
 enum class ReframeAspect(val ratio: Float, val outputWidth: Int, val outputHeight: Int) {
+    /**
+     * No output frame chosen — the default. The track is still stored on the timeline, but
+     * the canvas is left exactly as it was, so nothing is rendered and nothing is upscaled.
+     */
+    NONE(0f, 0, 0),
     ORIGINAL(0f, 0, 0),
     TIKTOK_9_16(9f / 16f, 1080, 1920),
-    YOUTUBE_16_9(16f / 9f, 1920, 1080);
+    YOUTUBE_16_9(16f / 9f, 1920, 1080),
+    /** Instagram reel: same delivery shape as TikTok, listed separately for the UI. */
+    IG_REEL_9_16(9f / 16f, 1080, 1920),
+    /** Instagram feed portrait: 4:5. */
+    IG_FEED_4_5(4f / 5f, 1080, 1350),
+    /** Instagram square post: 1:1. */
+    IG_SQUARE_1_1(1f, 1080, 1080);
 
     val isOriginal: Boolean get() = this == ORIGINAL
+
+    /** True when the user has not picked an output frame: render nothing. */
+    val isNone: Boolean get() = this == NONE
 }
 
 /**

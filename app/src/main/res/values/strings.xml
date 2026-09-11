@@ -87,6 +87,15 @@
     <string name="reframe_ratio_youtube">YouTube 16:9 — zoom and pan follow</string>
     <string name="reframe_ratio_original">Keep original ratio</string>
     <string name="reframe_applied">Reframe applied — %1$s</string>
+    <string name="tracking_frame_label">Frame output</string>
+    <string name="frame_output_none">None</string>
+    <string name="frame_output_tiktok">TikTok 9:16</string>
+    <string name="frame_output_youtube">YouTube 16:9</string>
+    <string name="frame_output_ig_reel">IG Reel 9:16</string>
+    <string name="frame_output_ig_feed">IG Feed 4:5</string>
+    <string name="frame_output_ig_square">IG Post 1:1</string>
+    <string name="frame_output_none_hint">Frame output: none. The track is stored, the canvas is untouched.</string>
+    <string name="tracking_frame_none_applied">Frame output: none — track stored, canvas unchanged</string>
     <string name="reframe_rendering">Applying reframe to the timeline…</string>
     <string name="reframe_failed">Could not apply the reframe to the timeline. The export will still use it.</string>
     <string name="reframe_preview_only">Clip is long, so only the preview shows the reframe — export still applies it.</string>

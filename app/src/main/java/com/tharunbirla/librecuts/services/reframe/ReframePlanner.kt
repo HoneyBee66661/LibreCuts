@@ -46,6 +46,25 @@ object ReframePlanner {
     ): ReframePlan {
         val srcW = sourceWidth.coerceAtLeast(2)
         val srcH = sourceHeight.coerceAtLeast(2)
+
+        // No output frame chosen: hand back a plan that touches nothing. This must come
+        // before any aspect arithmetic — [ReframeAspect.NONE] carries ratio 0, which would
+        // otherwise clamp the window down to MIN_WINDOW_FRACTION and crop hard.
+        if (spec.aspect.isNone) {
+            return ReframePlan(
+                windowWidthFraction = 1f,
+                windowHeightFraction = 1f,
+                keyframes = emptyList(),
+                zoom = 1f,
+                outWidth = srcW,
+                outHeight = srcH,
+                sourceWidth = srcW,
+                sourceHeight = srcH,
+                mode = spec.mode,
+                aspect = spec.aspect
+            )
+        }
+
         val canvas = outputCanvas(spec, srcW, srcH)
 
         if (keyframes.size < 2) {
@@ -135,7 +154,7 @@ object ReframePlanner {
      * [ReframeAspect.ORIGINAL] it mirrors the source, so an untouched frame keeps its size.
      */
     private fun outputCanvas(spec: ReframeSpec, srcW: Int, srcH: Int): Pair<Int, Int> {
-        if (spec.aspect.isOriginal) {
+        if (spec.aspect.isOriginal || spec.aspect.isNone) {
             return Pair(even(srcW), even(srcH))
         }
         return Pair(even(spec.aspect.outputWidth), even(spec.aspect.outputHeight))
