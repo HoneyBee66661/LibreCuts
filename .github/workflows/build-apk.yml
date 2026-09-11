@@ -1,6 +1,7 @@
 name: Build APK (own)
 
 # Build APK punya sendiri. Jalan otomatis tiap push, atau manual dari tab Actions.
+# Artifact sengaja difilter arm64-v8a saja (HP-nya arm64) supaya download-nya kecil.
 on:
   workflow_dispatch:
     inputs:
@@ -38,17 +39,16 @@ jobs:
         run: |
           chmod +x gradlew
           VARIANT="${{ inputs.variant }}"
-          [ -z "$VARIANT" ] && VARIANT="debug"
+          if [ -z "$VARIANT" ]; then VARIANT="debug"; fi
           echo "Building variant: $VARIANT"
-          ./gradlew "assemble${VARIANT^}" --no-daemon \
-            -Pandroid.injected.build.abi=arm64-v8a   # HP arm64 saja -> artifact kecil
+          ./gradlew "assemble${VARIANT^}" --no-daemon
 
-      - name: List APK hasil build
+      - name: List semua APK hasil build
         run: find app/build/outputs/apk -name '*.apk' -exec ls -lh {} \;
 
       - uses: actions/upload-artifact@v7
         with:
-          name: LibreCuts-${{ inputs.variant || 'debug' }}-${{ github.run_number }}
-          path: app/build/outputs/apk/**/*.apk
+          name: LibreCuts-arm64-${{ inputs.variant || 'debug' }}-${{ github.run_number }}
+          path: app/build/outputs/apk/**/*arm64*.apk
           if-no-files-found: error
           retention-days: 30
