@@ -59,12 +59,25 @@
             </intent-filter>
         </activity>
 
+        <!--
+            Orientation: portrait is the working orientation (the CapCut-like phone flow — the
+            editor opens the way the phone is held), and `user` follows the system auto-rotate
+            switch: rotate when the user has auto-rotate on, stay put when they don't.
+
+            `orientation` and `screenSize` are deliberately NOT in configChanges. While they were,
+            this activity was never recreated on rotation, which meant res/layout-land was never
+            inflated when the user turned the phone — the landscape variant only applied if the
+            activity *started* in landscape (which the old screenOrientation="landscape" forced).
+            Rotating now recreates the activity: the project lives in the ViewModel and survives,
+            the playhead and selected clip are saved in onSaveInstanceState, and long ffmpeg jobs
+            hold the orientation instead of being cancelled mid-run.
+        -->
         <activity
             android:name=".VideoEditingActivity"
             android:exported="true"
             android:theme="@style/Editor"
-            android:screenOrientation="landscape"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize"
+            android:screenOrientation="user"
+            android:configChanges="keyboardHidden"
             android:windowSoftInputMode="adjustResize" />
 
         <activity

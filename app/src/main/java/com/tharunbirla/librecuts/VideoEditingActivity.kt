@@ -460,6 +460,16 @@ class VideoEditingActivity : AppCompatActivity() {
     private val autoFrameMarkerSize = 0.25f
 
     /**
+     * Keys for the state that has to survive a rotation.
+     *
+     * Rotation recreates this activity (see the manifest) so that the right layout is inflated —
+     * the project itself lives in the ViewModel and survives, but the playhead and the selected
+     * clip are Activity state and would otherwise reset to zero.
+     */
+    private val statePlayheadKey = "librecuts_state_playhead_ms"
+    private val stateSelectedClipKey = "librecuts_state_selected_clip"
+
+    /**
      * Which engine answers "where is the subject?" for a tracking run.
      *
      * A real trade-off, so it is the user's choice and it is remembered: [CURRENT] is the
@@ -630,6 +640,14 @@ class VideoEditingActivity : AppCompatActivity() {
             SubjectFinder.CURRENT
         }
         applySubjectFinder()
+
+        // Rotation recreates this activity (see the manifest): put the user back where they were
+        // instead of at 0:00 on the first clip. pendingWorkspaceSeekMs is the funnel the workspace
+        // rebuild already honours. The project itself lives in the ViewModel and survives.
+        savedInstanceState?.let { state ->
+            pendingWorkspaceSeekMs = state.getLong(statePlayheadKey, 0L).takeIf { it > 0L }
+            selectedVideoIndex = state.getInt(stateSelectedClipKey, -1).takeIf { it >= 0 }
+        }
 
         // Initialize ViewModel and engine
         viewModel = ViewModelProvider(this).get(VideoEditingViewModel::class.java)
@@ -3154,6 +3172,36 @@ class VideoEditingActivity : AppCompatActivity() {
     }
 
     /**
+     * Hold the current orientation while an ffmpeg job runs.
+     *
+     * Rotation recreates this activity (see the manifest) and every ffmpeg job in this file is a
+     * `lifecycleScope` child, so rotating mid-encode would cancel the job. The export is worse
+     * still: it runs in its own scope, so it would survive the recreation and keep driving a
+     * destroyed Activity. Holding the orientation for the length of the job is the cheap fix, and
+     * it is what a user expects while a progress bar is moving.
+     */
+    private fun holdOrientationWhileBusy() {
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LOCKED
+    }
+
+    /** Hand orientation control back to the system (auto-rotate aware) once a job is done. */
+    private fun releaseOrientationWhenIdle() {
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER
+    }
+
+    /**
+     * Rotation recreates this activity, so anything the user was looking at is Activity state.
+     * The project, the undo stack and the dirty flag live in the ViewModel and survive on their
+     * own; the playhead and the selected clip do not, and resetting them to 0:00 on the first
+     * clip after every rotation is exactly the kind of thing that reads as "the editor restarted".
+     */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putLong(statePlayheadKey, if (::player.isInitialized) player.currentPosition else 0L)
+        outState.putInt(stateSelectedClipKey, selectedVideoIndex ?: -1)
+    }
+
+    /**
      * Point the tracking service at the chosen engine.
      *
      * Idempotent and cheap, so it runs both when the choice changes and immediately before every
@@ -3724,10 +3772,17 @@ class VideoEditingActivity : AppCompatActivity() {
                 durationMs = durationMs,
                 outputPath = output.absolutePath
             )
-            val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
-                ffmpegEngine.executeCommand(command)
+            // Rotating now would recreate this activity and cancel this lifecycleScope job, so the
+            // orientation is held for as long as the encoder runs.
+            holdOrientationWhileBusy()
+            val result = try {
+                withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    ffmpegEngine.executeCommand(command)
+                }
+            } finally {
+                hideLoading()
+                releaseOrientationWhenIdle()
             }
-            hideLoading()
 
             if (result is FFmpegRenderEngine.RenderResult.Success && output.exists()) {
                 val previous = lastReframeProxyFile
@@ -5915,6 +5970,9 @@ class VideoEditingActivity : AppCompatActivity() {
 
     private fun exportVideoFile(uri: Uri) {
         exportJob = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main + kotlinx.coroutines.Job()).launch {
+            // This job runs in its own scope, so a rotation would not cancel it — it would keep
+            // copying and updating a destroyed Activity. Hold the orientation instead.
+            holdOrientationWhileBusy()
             var outputFile: File? = null
             var customFileUri: Uri? = null
             try {
@@ -6005,7 +6063,9 @@ class VideoEditingActivity : AppCompatActivity() {
                         ).show()
                     }
                 }
+                releaseOrientationWhenIdle()
             } catch (e: kotlinx.coroutines.CancellationException) {
+                releaseOrientationWhenIdle()
                 outputFile?.let { if (it.exists()) it.delete() }
                 customFileUri?.let {
                     try {
@@ -6019,6 +6079,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     Toast.makeText(this@VideoEditingActivity, R.string.toast_export_cancelled, Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
+                releaseOrientationWhenIdle()
                 outputFile?.let { if (it.exists()) it.delete() }
                 customFileUri?.let {
                     try {
