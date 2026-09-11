@@ -3162,26 +3162,26 @@ class VideoEditingActivity : AppCompatActivity() {
             com.tharunbirla.librecuts.models.ReframeAspect.IG_REEL_9_16 ->
                 com.tharunbirla.librecuts.models.ReframeSpec(
                     com.tharunbirla.librecuts.models.ReframeAspect.IG_REEL_9_16,
-                    reframeMode.PAN_ONLY,
+                    com.tharunbirla.librecuts.models.ReframeMode.PAN_ONLY,
                     0f
                 )
             com.tharunbirla.librecuts.models.ReframeAspect.IG_FEED_4_5 ->
                 com.tharunbirla.librecuts.models.ReframeSpec(
                     com.tharunbirla.librecuts.models.ReframeAspect.IG_FEED_4_5,
-                    reframeMode.PAN_ONLY,
+                    com.tharunbirla.librecuts.models.ReframeMode.PAN_ONLY,
                     0f
                 )
             com.tharunbirla.librecuts.models.ReframeAspect.IG_SQUARE_1_1 ->
                 com.tharunbirla.librecuts.models.ReframeSpec(
                     com.tharunbirla.librecuts.models.ReframeAspect.IG_SQUARE_1_1,
-                    reframeMode.PAN_ONLY,
+                    com.tharunbirla.librecuts.models.ReframeMode.PAN_ONLY,
                     0f
                 )
             com.tharunbirla.librecuts.models.ReframeAspect.ORIGINAL ->
                 com.tharunbirla.librecuts.models.ReframeSpec.ORIGINAL
             else -> com.tharunbirla.librecuts.models.ReframeSpec(
                 com.tharunbirla.librecuts.models.ReframeAspect.NONE,
-                reframeMode.ZOOM_PAN,
+                com.tharunbirla.librecuts.models.ReframeMode.ZOOM_PAN,
                 0f
             )
         }
