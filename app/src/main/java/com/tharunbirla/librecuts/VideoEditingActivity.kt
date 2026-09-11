@@ -449,8 +449,15 @@ class VideoEditingActivity : AppCompatActivity() {
     private var trackingEditingToolbar: View? = null
     private var objectTrackingOverlayView: com.tharunbirla.librecuts.customviews.ObjectTrackingOverlayView? = null
     private var trackingInProgress = false
+    private var autoFrameInProgress = false
     /** 0f = auto zoom (derived from the path), otherwise a fixed factor. */
     private var trackingZoom = 0f
+    /**
+     * Marker that auto frame seeds on the first subject position, canvas-normalised: big enough
+     * for `Start Tracking` to have a textured patch to refine, small enough not to swallow the
+     * subject. Only a seed — the run itself is already stored as a path.
+     */
+    private val autoFrameMarkerSize = 0.25f
 
     /**
      * Output frame the tracker will commit to, picked in the tracking toolbar *before*
@@ -1817,6 +1824,10 @@ class VideoEditingActivity : AppCompatActivity() {
                 toolbar.findViewById<Button>(R.id.btnStartTracking)?.setBounceClickListener {
                     startObjectTrackingRun()
                 }
+                // Auto frame: the same state, filled by perception instead of by a drawn box.
+                toolbar.findViewById<Button>(R.id.btnAutoFrame)?.setBounceClickListener {
+                    startAutoFrameRun()
+                }
                 toolbar.findViewById<ImageButton>(R.id.btnApplyTracking)?.setBounceClickListener {
                     applyObjectTracking()
                 }
@@ -3106,20 +3117,16 @@ class VideoEditingActivity : AppCompatActivity() {
 
         // The marker lives in canvas space; the tracker works on the source clip, so map
         // across the current crop (identity when the clip is not cropped).
-        val crop = project.operations
-            .filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Crop>()
-            .lastOrNull()
-        val cropX = crop?.xFraction ?: 0f
-        val cropY = crop?.yFraction ?: 0f
-        val cropW = (crop?.wFraction ?: 1f).coerceAtLeast(0.01f)
-        val cropH = (crop?.hFraction ?: 1f).coerceAtLeast(0.01f)
+        val crop = currentCropRegion(project)
 
         val marker = overlay.getMarkerBounds()
+        val origin = com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper
+            .toSource(marker[0], marker[1], crop)
         val selection = com.tharunbirla.librecuts.services.tracking.TrackingSelection(
-            left = cropX + marker[0] * cropW,
-            top = cropY + marker[1] * cropH,
-            width = marker[2] * cropW,
-            height = marker[3] * cropH
+            left = origin.first,
+            top = origin.second,
+            width = marker[2] * crop.width,
+            height = marker[3] * crop.height
         )
 
         val videoUri = selectedClipUri(project) ?: return
@@ -3173,13 +3180,152 @@ class VideoEditingActivity : AppCompatActivity() {
 
             // Tracker returns source-relative centres; convert back into canvas space.
             trackingPath = result.path.map { point ->
-                point.copy(
-                    valueX = ((point.valueX - cropX) / cropW).coerceIn(0f, 1f),
-                    valueY = ((point.valueY - cropY) / cropH).coerceIn(0f, 1f)
-                )
+                val canvas = com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper
+                    .toCanvas(point.valueX, point.valueY, crop)
+                point.copy(valueX = canvas.first, valueY = canvas.second)
             }
             objectTrackingOverlayView?.setTrajectory(trackingPath.map { Pair(it.valueX, it.valueY) })
             updateTrackingUi()
+        }
+    }
+
+    /**
+     * The crop the tracker and the perception layer have to see *through*.
+     *
+     * Both of them read the source clip, while the marker and the stored path live in canvas
+     * space, so every crossing goes through [com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper].
+     * Identity when the clip is not cropped.
+     */
+    private fun currentCropRegion(
+        project: com.tharunbirla.librecuts.models.VideoProject
+    ): com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper.Crop {
+        val crop = project.operations
+            .filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Crop>()
+            .lastOrNull()
+        return com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper
+            .cropOf(crop?.xFraction, crop?.yFraction, crop?.wFraction, crop?.hFraction)
+    }
+
+    /**
+     * Auto frame: find the subject by what moves, and fill the path with it.
+     *
+     * A second *entry point* to the tracking state, not a second mode. It produces exactly what
+     * a drawn box produces — timed, normalised subject centres — so the marker, the camera-path
+     * choice (Clamp/DP), the frame row, the zoom row and every render path stay untouched. Only
+     * the origin of the path differs: shot detection + motion saliency instead of a template
+     * match, all decided in `AutoFramePlanner`, where CI can test it.
+     *
+     * The safety property lives in the empty case: when nothing is confidently moving, the path
+     * is left EMPTY and the user is told, because a camera that chases a guess is worse than no
+     * auto frame at all.
+     */
+    private fun startAutoFrameRun() {
+        if (autoFrameInProgress || trackingInProgress) return
+        val project = viewModel.project.value ?: return
+        val overlay = objectTrackingOverlayView ?: return
+        if (overlay.visibility != View.VISIBLE) return
+
+        val videoUri = selectedClipUri(project) ?: return
+        val range = selectedClipTimeRange(project)
+        val crop = currentCropRegion(project)
+
+        val progressDialog = ProgressDialog(this).apply {
+            setTitle(getString(R.string.tracking_auto_frame))
+            setMessage(getString(R.string.tracking_auto_frame_message))
+            setProgressStyle(ProgressDialog.STYLE_HORIZONTAL)
+            max = 100
+            setCancelable(false)
+            show()
+        }
+
+        autoFrameInProgress = true
+        lifecycleScope.launch {
+            val result = try {
+                // Decoding dominates the cost, so it goes off the main thread. Everything that
+                // decides anything is pure Kotlin inside AutoFramePlanner.
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val sampler = com.tharunbirla.librecuts.services.perception.VideoFrameSampler
+                        .open(this@VideoEditingActivity, videoUri)
+                        ?: return@withContext null
+                    try {
+                        com.tharunbirla.librecuts.services.perception.AutoFramePlanner.plan(
+                            sampler.sampleRange(
+                                startMs = range.first,
+                                endMs = range.second,
+                                onProgress = { progress ->
+                                    runOnUiThread {
+                                        progressDialog.progress =
+                                            (progress * 100f).toInt().coerceIn(0, 100)
+                                    }
+                                }
+                            )
+                        )
+                    } finally {
+                        sampler.release()
+                    }
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                Log.w(TAG, "Auto frame failed: ${e.message}")
+                null
+            } finally {
+                progressDialog.dismiss()
+                autoFrameInProgress = false
+            }
+
+            if (result == null) {
+                Toast.makeText(
+                    this@VideoEditingActivity,
+                    R.string.tracking_auto_frame_failed,
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+            if (result.isEmpty) {
+                // Nothing was confidently moving: no path, no guess, and say so.
+                Toast.makeText(
+                    this@VideoEditingActivity,
+                    R.string.tracking_auto_frame_empty,
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+
+            // Planner centres are relative to the source clip; the timeline wants canvas space.
+            val mapped = result.path.map { keyframe ->
+                val canvas = com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper
+                    .toCanvas(keyframe.valueX, keyframe.valueY, crop)
+                com.tharunbirla.librecuts.models.EditOperation.KeyframePoint(
+                    timeMs = keyframe.timeMs,
+                    valueX = canvas.first,
+                    valueY = canvas.second,
+                    confidence = keyframe.confidence
+                )
+            }
+
+            // Seed the marker on the first subject position *before* storing the path: moving
+            // the marker clears the path, and at this point it is still empty, so this cannot
+            // wipe the run we are about to commit. The box is a patch Start Tracking can refine.
+            val markerSize = autoFrameMarkerSize
+            val first = mapped.first()
+            overlay.setMarkerBounds(
+                (first.valueX - markerSize / 2f).coerceIn(0f, 1f - markerSize),
+                (first.valueY - markerSize / 2f).coerceIn(0f, 1f - markerSize),
+                markerSize,
+                markerSize
+            )
+
+            trackingPath = mapped
+            trackingZoom = 0f
+            overlay.setTrajectory(mapped.map { Pair(it.valueX, it.valueY) })
+            updateTrackingUi()
+
+            Toast.makeText(
+                this@VideoEditingActivity,
+                getString(R.string.tracking_auto_frame_done, mapped.size, result.shots.size),
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 

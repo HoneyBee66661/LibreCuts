@@ -70,8 +70,13 @@
     <string name="str_tracking">Tracking</string>
     <string name="tracking_title">Tracking</string>
     <string name="tracking_message">Following the object through the clip…</string>
-    <string name="tracking_hint_mark">Drag the box onto the object you want to follow, then press Start Tracking.</string>
+    <string name="tracking_hint_mark">Drag the box onto the object you want to follow and press Start Tracking — or press Auto frame to follow whatever moves.</string>
     <string name="tracking_start">Start Tracking</string>
+    <string name="tracking_auto_frame">Auto frame</string>
+    <string name="tracking_auto_frame_message">Finding what moves in the clip…</string>
+    <string name="tracking_auto_frame_empty">No moving subject found. Nothing was applied — the frame is untouched.</string>
+    <string name="tracking_auto_frame_done">Auto frame: %1$d keyframes over %2$d shot(s). Press ✓ to apply.</string>
+    <string name="tracking_auto_frame_failed">Auto frame could not read this clip. Try Start Tracking instead.</string>
     <string name="tracking_status_tracked">Tracked %1$d of %2$d frames · zoom %3$s</string>
     <string name="tracking_status_retrack">Adjust the box or press Start Tracking again to re-track.</string>
     <string name="tracking_zoom_auto">Auto</string>

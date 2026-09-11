@@ -219,6 +219,19 @@
                 android:layout_height="wrap_content"
                 android:text="@string/tracking_start"
                 android:textSize="13sp" />
+
+            <!-- Auto frame: the same contract as Start Tracking (a timed path of subject
+                 centres), but the subject is found by what moves instead of by a drawn box.
+                 It is a second entry point to the same state, not a second mode: whatever the
+                 path came from, the marker, the camera-path choice, the frame row and every
+                 render path below are identical. -->
+            <Button
+                android:id="@+id/btnAutoFrame"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="@string/tracking_auto_frame"
+                android:textSize="13sp" />
         </LinearLayout>
 
         <LinearLayout
