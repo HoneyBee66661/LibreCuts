@@ -3153,7 +3153,6 @@ class VideoEditingActivity : AppCompatActivity() {
     private fun reframeSpecFor(
         aspect: com.tharunbirla.librecuts.models.ReframeAspect
     ): com.tharunbirla.librecuts.models.ReframeSpec {
-        val reframeMode = com.tharunbirla.librecuts.models.ReframeMode
         return when (aspect) {
             com.tharunbirla.librecuts.models.ReframeAspect.TIKTOK_9_16 ->
                 com.tharunbirla.librecuts.models.ReframeSpec.TIKTOK
