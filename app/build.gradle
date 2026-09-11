@@ -108,4 +108,9 @@ dependencies {
     androidTestImplementation libs.androidx.junit
     androidTestImplementation libs.androidx.espresso.core
     implementation 'com.google.code.gson:gson:2.10.1'
+    // On-device face detection, used by the "accurate" subject finder. Bundled on purpose: the
+    // model ships in the APK (≈+7 MB) instead of being fetched through Play Services, so the
+    // feature cannot silently become unavailable on a device without GMS or without a network.
+    // Unbundled would cost ≈+0.8 MB — swap the coordinate for it if APK size ever outweighs that.
+    implementation 'com.google.mlkit:face-detection:16.1.7'
 }

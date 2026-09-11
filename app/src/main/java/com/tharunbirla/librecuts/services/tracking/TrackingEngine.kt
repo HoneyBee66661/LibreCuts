@@ -16,6 +16,11 @@ data class TrackingRequest(
     val selection: TrackingSelection,
     val sampleFps: Int = 6,
     val processingWidth: Int = 320,
+    /**
+     * True when the caller has no subject box and wants the engine to *choose* one — auto frame.
+     * A seeded run (a drawn box) leaves this false and the box decides who the subject is.
+     */
+    val preferProminentSubject: Boolean = false,
     /** Local search radius per sample, as a multiple of the selection width. */
     val searchRadiusFactor: Float = 0.35f,
     /** NCC score below this counts as a miss (occlusion, cut, motion blur). */

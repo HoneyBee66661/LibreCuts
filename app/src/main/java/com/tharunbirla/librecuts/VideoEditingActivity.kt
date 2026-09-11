@@ -449,8 +449,40 @@ class VideoEditingActivity : AppCompatActivity() {
     private var trackingEditingToolbar: View? = null
     private var objectTrackingOverlayView: com.tharunbirla.librecuts.customviews.ObjectTrackingOverlayView? = null
     private var trackingInProgress = false
+    private var autoFrameInProgress = false
     /** 0f = auto zoom (derived from the path), otherwise a fixed factor. */
     private var trackingZoom = 0f
+    /**
+     * Marker that auto frame seeds on the first subject position, canvas-normalised: big enough
+     * for `Start Tracking` to have a textured patch to refine, small enough not to swallow the
+     * subject. Only a seed — the run itself is already stored as a path.
+     */
+    private val autoFrameMarkerSize = 0.25f
+
+    /**
+     * Keys for the state that has to survive a rotation.
+     *
+     * Rotation recreates this activity (see the manifest) so that the right layout is inflated —
+     * the project itself lives in the ViewModel and survives, but the playhead and the selected
+     * clip are Activity state and would otherwise reset to zero.
+     */
+    private val statePlayheadKey = "librecuts_state_playhead_ms"
+    private val stateSelectedClipKey = "librecuts_state_selected_clip"
+
+    /**
+     * Which engine answers "where is the subject?" for a tracking run.
+     *
+     * A real trade-off, so it is the user's choice and it is remembered: [CURRENT] is the
+     * built-in template matcher (no model, no APK cost, loses the subject on rotation or low
+     * texture), [ML_KIT] is on-device face detection (+~7 MB, holds through both). Both feed the
+     * same [com.tharunbirla.librecuts.services.tracking.TrackingEngine] contract, so the choice
+     * changes nothing downstream.
+     */
+    private enum class SubjectFinder { CURRENT, ML_KIT }
+
+    private var subjectFinder = SubjectFinder.CURRENT
+    /** SharedPreferences key for [subjectFinder] — a preference, so it survives the process. */
+    private val subjectFinderPrefKey = "subject_finder"
 
     /**
      * Output frame the tracker will commit to, picked in the tracking toolbar *before*
@@ -458,6 +490,16 @@ class VideoEditingActivity : AppCompatActivity() {
      * canvas alone.
      */
     private var trackingFrameAspect = com.tharunbirla.librecuts.models.ReframeAspect.NONE
+
+    /**
+     * How the camera path is decided, picked in the same toolbar.
+     *
+     * CLAMP is the default because it is the behaviour every existing track was made with —
+     * switching the default silently would change how saved projects render. DP is the
+     * better framing (subject stays centred through the whole traverse) at the cost of one
+     * steady push-in, so it is offered rather than imposed.
+     */
+    private var trackingPathMode = com.tharunbirla.librecuts.models.PathMode.CLAMP
     private var trackingPath: List<com.tharunbirla.librecuts.models.EditOperation.KeyframePoint> = emptyList()
     private var videoMaskOverlayView: com.tharunbirla.librecuts.customviews.VideoMaskOverlayView? = null
     private var mainVideoMaskContainer: com.tharunbirla.librecuts.customviews.MaskedFrameLayout? = null
@@ -521,7 +563,11 @@ class VideoEditingActivity : AppCompatActivity() {
     private val saveProjectLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri: Uri? ->
-        if (uri != null) {
+        if (uri == null) {
+            // User backed out of the save picker: forget the pending quit, otherwise a later
+            // successful save (e.g. the editor's own Save Project action) would close the editor.
+            shouldQuitAfterSave = false
+        } else {
             try {
                 val project = viewModel.project.value
                 if (project != null) {
@@ -536,8 +582,12 @@ class VideoEditingActivity : AppCompatActivity() {
                         shouldQuitAfterSave = false
                         finish()
                     }
+                } else {
+                    shouldQuitAfterSave = false
                 }
             } catch (e: Exception) {
+                // Stay in the editor: a failed save must never be followed by an exit.
+                shouldQuitAfterSave = false
                 Log.e(TAG, "Failed to save project", e)
                 Toast.makeText(this, "Failed to save project", Toast.LENGTH_SHORT).show()
             }
@@ -580,6 +630,23 @@ class VideoEditingActivity : AppCompatActivity() {
                     )
         } else {
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        }
+
+        // Subject finder: restore the remembered choice and point the tracking service at it
+        // before any run can happen.
+        subjectFinder = if (prefs.getString(subjectFinderPrefKey, null) == SubjectFinder.ML_KIT.name) {
+            SubjectFinder.ML_KIT
+        } else {
+            SubjectFinder.CURRENT
+        }
+        applySubjectFinder()
+
+        // Rotation recreates this activity (see the manifest): put the user back where they were
+        // instead of at 0:00 on the first clip. pendingWorkspaceSeekMs is the funnel the workspace
+        // rebuild already honours. The project itself lives in the ViewModel and survives.
+        savedInstanceState?.let { state ->
+            pendingWorkspaceSeekMs = state.getLong(statePlayheadKey, 0L).takeIf { it > 0L }
+            selectedVideoIndex = state.getInt(stateSelectedClipKey, -1).takeIf { it >= 0 }
         }
 
         // Initialize ViewModel and engine
@@ -1799,6 +1866,15 @@ class VideoEditingActivity : AppCompatActivity() {
                 toolbar.findViewById<Button>(R.id.btnStartTracking)?.setBounceClickListener {
                     startObjectTrackingRun()
                 }
+                // Auto frame: the same state, filled by perception instead of by a drawn box.
+                toolbar.findViewById<Button>(R.id.btnAutoFrame)?.setBounceClickListener {
+                    startAutoFrameRun()
+                }
+                // Subject finder: which engine answers "where is the subject" for a run.
+                toolbar.findViewById<TextView>(R.id.tvEngineCurrent)
+                    ?.setBounceClickListener { selectSubjectFinder(SubjectFinder.CURRENT) }
+                toolbar.findViewById<TextView>(R.id.tvEngineMlKit)
+                    ?.setBounceClickListener { selectSubjectFinder(SubjectFinder.ML_KIT) }
                 toolbar.findViewById<ImageButton>(R.id.btnApplyTracking)?.setBounceClickListener {
                     applyObjectTracking()
                 }
@@ -1821,6 +1897,12 @@ class VideoEditingActivity : AppCompatActivity() {
                     ?.setBounceClickListener { selectTrackingFrameAspect(com.tharunbirla.librecuts.models.ReframeAspect.IG_FEED_4_5) }
                 toolbar.findViewById<TextView>(R.id.tvFrameIgSquare)
                     ?.setBounceClickListener { selectTrackingFrameAspect(com.tharunbirla.librecuts.models.ReframeAspect.IG_SQUARE_1_1) }
+
+                // Camera path mode. Clamp stays the default so existing tracks render unchanged.
+                toolbar.findViewById<TextView>(R.id.tvPathClamp)
+                    ?.setBounceClickListener { selectTrackingPathMode(com.tharunbirla.librecuts.models.PathMode.CLAMP) }
+                toolbar.findViewById<TextView>(R.id.tvPathDp)
+                    ?.setBounceClickListener { selectTrackingPathMode(com.tharunbirla.librecuts.models.PathMode.DP) }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Tracking toolbar not found: ${e.message}")
@@ -2913,11 +2995,13 @@ class VideoEditingActivity : AppCompatActivity() {
             trackingPath = existing.path
             // Reflect the frame the track was committed with, so the row is not blank state.
             trackingFrameAspect = existing.reframeSpec().aspect
+            trackingPathMode = existing.reframeSpec().pathModeOr()
             overlay.setTrajectory(existing.path.map { Pair(it.valueX, it.valueY) })
         } else {
             overlay.setMarkerBounds(0.3f, 0.3f, 0.4f, 0.4f)
             overlay.clearTrajectory()
             trackingFrameAspect = com.tharunbirla.librecuts.models.ReframeAspect.NONE
+            trackingPathMode = com.tharunbirla.librecuts.models.PathMode.CLAMP
         }
 
         // The overlay draws in the same box as the previewed canvas.
@@ -2975,6 +3059,28 @@ class VideoEditingActivity : AppCompatActivity() {
         }
         highlightZoomOption(toolbar)
         highlightFrameOption(toolbar)
+        highlightPathOption(toolbar)
+        highlightSubjectFinderOption(toolbar)
+    }
+
+    /**
+     * Mark the chosen camera-path mode.
+     *
+     * The two options are a real trade-off, not a preference: CLAMP never softens the image
+     * but lets the subject drift off centre at the frame edge; DP keeps the subject centred
+     * by buying reach with one steady push-in. Both are stored on the track, so the choice
+     * travels to export.
+     */
+    private fun highlightPathOption(toolbar: View) {
+        val dpSelected = trackingPathMode == com.tharunbirla.librecuts.models.PathMode.DP
+        listOf(
+            R.id.tvPathClamp to !dpSelected,
+            R.id.tvPathDp to dpSelected
+        ).forEach { (id, selected) ->
+            toolbar.findViewById<TextView>(id)?.setTextColor(
+                if (selected) getColor(R.color.activeTool) else getColor(R.color.toolTextInactive)
+            )
+        }
     }
 
     /**
@@ -3031,6 +3137,87 @@ class VideoEditingActivity : AppCompatActivity() {
         updateTrackingUi()
     }
 
+    private fun selectTrackingPathMode(mode: com.tharunbirla.librecuts.models.PathMode) {
+        trackingPathMode = mode
+        updateTrackingUi()
+    }
+
+    /**
+     * Mark the active subject finder.
+     *
+     * Not cosmetic: it swaps the engine behind `ObjectTrackingService`, and it is persisted
+     * because it is a working preference — how much APK you are willing to carry for robustness —
+     * rather than a per-clip decision.
+     */
+    private fun highlightSubjectFinderOption(toolbar: View) {
+        val mlKit = subjectFinder == SubjectFinder.ML_KIT
+        listOf(
+            R.id.tvEngineCurrent to !mlKit,
+            R.id.tvEngineMlKit to mlKit
+        ).forEach { (id, selected) ->
+            toolbar.findViewById<TextView>(id)?.setTextColor(
+                if (selected) getColor(R.color.activeTool) else getColor(R.color.toolTextInactive)
+            )
+        }
+    }
+
+    private fun selectSubjectFinder(finder: SubjectFinder) {
+        subjectFinder = finder
+        applySubjectFinder()
+        getSharedPreferences("librecuts_prefs", MODE_PRIVATE)
+            .edit()
+            .putString(subjectFinderPrefKey, finder.name)
+            .apply()
+        updateTrackingUi()
+    }
+
+    /**
+     * Hold the current orientation while an ffmpeg job runs.
+     *
+     * Rotation recreates this activity (see the manifest) and every ffmpeg job in this file is a
+     * `lifecycleScope` child, so rotating mid-encode would cancel the job. The export is worse
+     * still: it runs in its own scope, so it would survive the recreation and keep driving a
+     * destroyed Activity. Holding the orientation for the length of the job is the cheap fix, and
+     * it is what a user expects while a progress bar is moving.
+     */
+    private fun holdOrientationWhileBusy() {
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LOCKED
+    }
+
+    /** Hand orientation control back to the system (auto-rotate aware) once a job is done. */
+    private fun releaseOrientationWhenIdle() {
+        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER
+    }
+
+    /**
+     * Rotation recreates this activity, so anything the user was looking at is Activity state.
+     * The project, the undo stack and the dirty flag live in the ViewModel and survive on their
+     * own; the playhead and the selected clip do not, and resetting them to 0:00 on the first
+     * clip after every rotation is exactly the kind of thing that reads as "the editor restarted".
+     */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putLong(statePlayheadKey, if (::player.isInitialized) player.currentPosition else 0L)
+        outState.putInt(stateSelectedClipKey, selectedVideoIndex ?: -1)
+    }
+
+    /**
+     * Point the tracking service at the chosen engine.
+     *
+     * Idempotent and cheap, so it runs both when the choice changes and immediately before every
+     * run: the run-time call is what guarantees the engine matches the UI even after the activity
+     * was recreated by the system.
+     */
+    private fun applySubjectFinder() {
+        com.tharunbirla.librecuts.services.ObjectTrackingService.engine =
+            when (subjectFinder) {
+                SubjectFinder.ML_KIT ->
+                    com.tharunbirla.librecuts.services.tracking.MlKitFaceTracker()
+                SubjectFinder.CURRENT ->
+                    com.tharunbirla.librecuts.services.tracking.TemplateMatchTracker()
+            }
+    }
+
     /** Mirror of TrackObject.autoZoom() so the status label shows the same number. */
     private fun autoZoomFor(
         path: List<com.tharunbirla.librecuts.models.EditOperation.KeyframePoint>
@@ -3052,22 +3239,21 @@ class VideoEditingActivity : AppCompatActivity() {
         val overlay = objectTrackingOverlayView ?: return
         if (overlay.visibility != View.VISIBLE) return
 
+        // Use the engine the toolbar says is selected, whatever the process did earlier.
+        applySubjectFinder()
+
         // The marker lives in canvas space; the tracker works on the source clip, so map
         // across the current crop (identity when the clip is not cropped).
-        val crop = project.operations
-            .filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Crop>()
-            .lastOrNull()
-        val cropX = crop?.xFraction ?: 0f
-        val cropY = crop?.yFraction ?: 0f
-        val cropW = (crop?.wFraction ?: 1f).coerceAtLeast(0.01f)
-        val cropH = (crop?.hFraction ?: 1f).coerceAtLeast(0.01f)
+        val crop = currentCropRegion(project)
 
         val marker = overlay.getMarkerBounds()
+        val origin = com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper
+            .toSource(marker[0], marker[1], crop)
         val selection = com.tharunbirla.librecuts.services.tracking.TrackingSelection(
-            left = cropX + marker[0] * cropW,
-            top = cropY + marker[1] * cropH,
-            width = marker[2] * cropW,
-            height = marker[3] * cropH
+            left = origin.first,
+            top = origin.second,
+            width = marker[2] * crop.width,
+            height = marker[3] * crop.height
         )
 
         val videoUri = selectedClipUri(project) ?: return
@@ -3111,9 +3297,14 @@ class VideoEditingActivity : AppCompatActivity() {
             }
 
             if (result.isEmpty) {
+                // The two engines fail for different reasons, so they get different advice.
                 Toast.makeText(
                     this@VideoEditingActivity,
-                    R.string.tracking_failed,
+                    if (subjectFinder == SubjectFinder.ML_KIT) {
+                        R.string.tracking_engine_mlkit_empty
+                    } else {
+                        R.string.tracking_failed
+                    },
                     Toast.LENGTH_LONG
                 ).show()
                 return@launch
@@ -3121,14 +3312,222 @@ class VideoEditingActivity : AppCompatActivity() {
 
             // Tracker returns source-relative centres; convert back into canvas space.
             trackingPath = result.path.map { point ->
-                point.copy(
-                    valueX = ((point.valueX - cropX) / cropW).coerceIn(0f, 1f),
-                    valueY = ((point.valueY - cropY) / cropH).coerceIn(0f, 1f)
-                )
+                val canvas = com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper
+                    .toCanvas(point.valueX, point.valueY, crop)
+                point.copy(valueX = canvas.first, valueY = canvas.second)
             }
             objectTrackingOverlayView?.setTrajectory(trackingPath.map { Pair(it.valueX, it.valueY) })
             updateTrackingUi()
         }
+    }
+
+    /**
+     * The crop the tracker and the perception layer have to see *through*.
+     *
+     * Both of them read the source clip, while the marker and the stored path live in canvas
+     * space, so every crossing goes through [com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper].
+     * Identity when the clip is not cropped.
+     */
+    private fun currentCropRegion(
+        project: com.tharunbirla.librecuts.models.VideoProject
+    ): com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper.Crop {
+        val crop = project.operations
+            .filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Crop>()
+            .lastOrNull()
+        return com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper
+            .cropOf(crop?.xFraction, crop?.yFraction, crop?.wFraction, crop?.hFraction)
+    }
+
+    /**
+     * Auto frame: find the subject by what moves, and fill the path with it.
+     *
+     * A second *entry point* to the tracking state, not a second mode. It produces exactly what
+     * a drawn box produces — timed, normalised subject centres — so the marker, the camera-path
+     * choice (Clamp/DP), the frame row, the zoom row and every render path stay untouched. Only
+     * the origin of the path differs: shot detection + motion saliency instead of a template
+     * match, all decided in `AutoFramePlanner`, where CI can test it.
+     *
+     * The safety property lives in the empty case: when nothing is confidently moving, the path
+     * is left EMPTY and the user is told, because a camera that chases a guess is worse than no
+     * auto frame at all.
+     */
+    private fun startAutoFrameRun() {
+        if (autoFrameInProgress || trackingInProgress) return
+        val project = viewModel.project.value ?: return
+        val overlay = objectTrackingOverlayView ?: return
+        if (overlay.visibility != View.VISIBLE) return
+
+        val videoUri = selectedClipUri(project) ?: return
+        val range = selectedClipTimeRange(project)
+        val crop = currentCropRegion(project)
+        // Captured up front: the toggle must not change under a running analysis.
+        val finder = subjectFinder
+        applySubjectFinder()
+
+        val progressDialog = ProgressDialog(this).apply {
+            setTitle(getString(R.string.tracking_auto_frame))
+            setMessage(getString(R.string.tracking_auto_frame_message))
+            setProgressStyle(ProgressDialog.STYLE_HORIZONTAL)
+            max = 100
+            setCancelable(false)
+            show()
+        }
+
+        val onProgress: (Float) -> Unit = { progress ->
+            runOnUiThread { progressDialog.progress = (progress * 100f).toInt().coerceIn(0, 100) }
+        }
+
+        autoFrameInProgress = true
+        lifecycleScope.launch {
+            val outcome = try {
+                // Decoding (and, with ML Kit, inference) dominates the cost, so it runs off the
+                // main thread. Every *decision* is pure Kotlin — AutoFramePlanner or FaceSelector.
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    when (finder) {
+                        SubjectFinder.ML_KIT -> autoFrameByFace(videoUri, range, onProgress)
+                        SubjectFinder.CURRENT -> autoFrameByMotion(videoUri, range, onProgress)
+                    }
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                Log.w(TAG, "Auto frame failed: ${e.message}")
+                null
+            } finally {
+                progressDialog.dismiss()
+                autoFrameInProgress = false
+            }
+
+            if (outcome == null) {
+                Toast.makeText(
+                    this@VideoEditingActivity,
+                    R.string.tracking_auto_frame_failed,
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+            if (outcome.path.size < 2) {
+                // Nothing was confidently found: no path, no guess, and say so. The two engines
+                // look for different things, so they get different advice.
+                Toast.makeText(
+                    this@VideoEditingActivity,
+                    if (finder == SubjectFinder.ML_KIT) {
+                        R.string.tracking_auto_frame_faces_empty
+                    } else {
+                        R.string.tracking_auto_frame_empty
+                    },
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+
+            // Engine centres are relative to the source clip; the timeline wants canvas space.
+            val mapped = outcome.path.map { point ->
+                val canvas = com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper
+                    .toCanvas(point.valueX, point.valueY, crop)
+                point.copy(valueX = canvas.first, valueY = canvas.second)
+            }
+
+            // Seed the marker on the first subject position *before* storing the path: moving
+            // the marker clears the path, and at this point it is still empty, so this cannot
+            // wipe the run we are about to commit. The box is a patch Start Tracking can refine.
+            val markerSize = autoFrameMarkerSize
+            val first = mapped.first()
+            overlay.setMarkerBounds(
+                (first.valueX - markerSize / 2f).coerceIn(0f, 1f - markerSize),
+                (first.valueY - markerSize / 2f).coerceIn(0f, 1f - markerSize),
+                markerSize,
+                markerSize
+            )
+
+            trackingPath = mapped
+            trackingZoom = 0f
+            overlay.setTrajectory(mapped.map { Pair(it.valueX, it.valueY) })
+            updateTrackingUi()
+
+            Toast.makeText(this@VideoEditingActivity, outcome.summary, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
+     * What both auto-frame engines produce: a path in **source** space, plus the sentence to show
+     * when it lands. One shape is what keeps the caller engine-agnostic — the analysis is the only
+     * thing that differs, the state it fills is identical.
+     */
+    private class AutoFrameOutcome(
+        val path: List<com.tharunbirla.librecuts.models.EditOperation.KeyframePoint>,
+        val summary: String
+    )
+
+    /** Auto frame, model-free tier: shot detection + motion saliency. */
+    private suspend fun autoFrameByMotion(
+        videoUri: Uri,
+        range: Pair<Long, Long>,
+        onProgress: (Float) -> Unit
+    ): AutoFrameOutcome? {
+        val sampler = com.tharunbirla.librecuts.services.perception.VideoFrameSampler
+            .open(this, videoUri) ?: return null
+        return try {
+            val result = com.tharunbirla.librecuts.services.perception.AutoFramePlanner.plan(
+                sampler.sampleRange(range.first, range.second, onProgress = onProgress)
+            )
+            AutoFrameOutcome(
+                path = result.path.map {
+                    com.tharunbirla.librecuts.models.EditOperation.KeyframePoint(
+                        timeMs = it.timeMs,
+                        valueX = it.x,
+                        valueY = it.y,
+                        confidence = it.confidence
+                    )
+                },
+                summary = getString(
+                    R.string.tracking_auto_frame_done,
+                    result.path.size,
+                    result.shots.size
+                )
+            )
+        } finally {
+            sampler.release()
+        }
+    }
+
+    /**
+     * Auto frame, face tier: there is no box to draw, so the whole frame is the selection and the
+     * most prominent face becomes the subject.
+     *
+     * Everything after that is the policy Start Tracking already runs on — identity lock, the
+     * insist-ladder, no teleporting — and the engine emits no path at all when a face was never
+     * confirmed twice, so this cannot turn a face-less clip into a camera move.
+     */
+    private suspend fun autoFrameByFace(
+        videoUri: Uri,
+        range: Pair<Long, Long>,
+        onProgress: (Float) -> Unit
+    ): AutoFrameOutcome? {
+        val result = com.tharunbirla.librecuts.services.ObjectTrackingService.track(
+            context = this,
+            request = com.tharunbirla.librecuts.services.tracking.TrackingRequest(
+                videoUri = videoUri,
+                startTimeMs = range.first,
+                endTimeMs = range.second,
+                // No box: the frame is the search space, and the engine picks the subject.
+                selection = com.tharunbirla.librecuts.services.tracking.TrackingSelection(
+                    0f, 0f, 1f, 1f
+                ),
+                preferProminentSubject = true
+            ),
+            onProgress = onProgress
+        )
+        if (result.isEmpty) return AutoFrameOutcome(emptyList(), "")
+        return AutoFrameOutcome(
+            path = result.path,
+            summary = getString(
+                R.string.tracking_auto_frame_done_faces,
+                result.path.size,
+                result.trackedFrames,
+                result.sampledFrames
+            )
+        )
     }
 
     /** Commit the track to the timeline, then return to the main toolbar. */
@@ -3224,7 +3623,13 @@ class VideoEditingActivity : AppCompatActivity() {
             viewModel.project.value?.let { applyWorkspaceMediaState(it) }
             return
         }
-        applyReframeSpec(reframeSpecFor(aspect), frameAspectLabel(aspect))
+        // The path mode travels with the framing decision: it lands on the same op and reaches
+        // the planner (proxy render and export) through spec.pathModeOr(), so the two render
+        // paths cannot disagree.
+        applyReframeSpec(
+            reframeSpecFor(aspect).copy(pathMode = trackingPathMode),
+            frameAspectLabel(aspect)
+        )
     }
 
     /**
@@ -3367,10 +3772,17 @@ class VideoEditingActivity : AppCompatActivity() {
                 durationMs = durationMs,
                 outputPath = output.absolutePath
             )
-            val result = withContext(kotlinx.coroutines.Dispatchers.IO) {
-                ffmpegEngine.executeCommand(command)
+            // Rotating now would recreate this activity and cancel this lifecycleScope job, so the
+            // orientation is held for as long as the encoder runs.
+            holdOrientationWhileBusy()
+            val result = try {
+                withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    ffmpegEngine.executeCommand(command)
+                }
+            } finally {
+                hideLoading()
+                releaseOrientationWhenIdle()
             }
-            hideLoading()
 
             if (result is FFmpegRenderEngine.RenderResult.Success && output.exists()) {
                 val previous = lastReframeProxyFile
@@ -5558,6 +5970,9 @@ class VideoEditingActivity : AppCompatActivity() {
 
     private fun exportVideoFile(uri: Uri) {
         exportJob = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main + kotlinx.coroutines.Job()).launch {
+            // This job runs in its own scope, so a rotation would not cancel it — it would keep
+            // copying and updating a destroyed Activity. Hold the orientation instead.
+            holdOrientationWhileBusy()
             var outputFile: File? = null
             var customFileUri: Uri? = null
             try {
@@ -5648,7 +6063,9 @@ class VideoEditingActivity : AppCompatActivity() {
                         ).show()
                     }
                 }
+                releaseOrientationWhenIdle()
             } catch (e: kotlinx.coroutines.CancellationException) {
+                releaseOrientationWhenIdle()
                 outputFile?.let { if (it.exists()) it.delete() }
                 customFileUri?.let {
                     try {
@@ -5662,6 +6079,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     Toast.makeText(this@VideoEditingActivity, R.string.toast_export_cancelled, Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
+                releaseOrientationWhenIdle()
                 outputFile?.let { if (it.exists()) it.delete() }
                 customFileUri?.let {
                     try {
@@ -8607,32 +9025,44 @@ class VideoEditingActivity : AppCompatActivity() {
         bottomSheet.show()
     }
 
+    /**
+     * Exit prompt for edit mode.
+     *
+     * Deliberately a plain [MaterialAlertDialogBuilder] instead of a BottomSheetDialog. A
+     * BottomSheetDialog has no scroll container of its own, so the old sheet's fixed-height stack
+     * (header + three buttons) sank below the visible area in landscape, where the editor only has
+     * ~300-360dp of usable height — the user reported the exit action as "tenggelam" and could only
+     * reach it by scrolling. An AlertDialog has no layout of its own to keep in sync with the
+     * orientation: it centres itself in whatever space exists, scrolls its own message, and keeps
+     * both buttons on screen in portrait and landscape alike.
+     *
+     * The wording follows the Office "save before exit" prompt on purpose: users have answered
+     * that exact question thousands of times, so the first sentence is the question and the
+     * second names the consequence of the wrong answer.
+     *
+     * Yes → save the project (same path as the editor's Save Project action) and then go home.
+     * No  → go home immediately, without saving.
+     */
     private fun showQuitConfirmationDialog() {
         if (!viewModel.hasUnsavedEdits.value) {
             finish()
             return
         }
 
-        val bottomSheet = com.google.android.material.bottomsheet.BottomSheetDialog(this)
-        val view = layoutInflater.inflate(R.layout.dialog_unsaved_changes, null)
-
-        view.findViewById<com.google.android.material.button.MaterialButton>(R.id.btnSaveAndQuit).setBounceClickListener {
-            bottomSheet.dismiss()
-            shouldQuitAfterSave = true
-            saveProjectLauncher.launch("project.lcprj")
-        }
-
-        view.findViewById<com.google.android.material.button.MaterialButton>(R.id.btnKeepEditing).setBounceClickListener {
-            bottomSheet.dismiss()
-        }
-
-        view.findViewById<com.google.android.material.button.MaterialButton>(R.id.btnDiscard).setBounceClickListener {
-            bottomSheet.dismiss()
-            finish()
-        }
-
-        bottomSheet.setContentView(view)
-        bottomSheet.show()
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Exit")
+            .setMessage(
+                "Do you want to save your changes?\n\n" +
+                        "Your changes will be lost if you don't save them."
+            )
+            .setPositiveButton("Yes") { _, _ ->
+                shouldQuitAfterSave = true
+                saveProjectLauncher.launch("project.lcprj")
+            }
+            .setNegativeButton("No") { _, _ ->
+                finish()
+            }
+            .show()
     }
 
     private fun getSnapTargetsMs(): List<Long> {
