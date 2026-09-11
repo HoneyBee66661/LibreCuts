@@ -87,17 +87,27 @@ class AutoFramePlannerTest {
         assertTrue("a pure pan must not become a subject", result.isEmpty)
     }
 
+    private fun brighter(src: LumaFrame, delta: Float) =
+        LumaFrame(FloatArray(src.data.size) { (src.data[it] + delta).coerceAtMost(1f) }, src.w, src.h)
+
     @Test
     fun aCutStartsANewShotAndTheOldSubjectIsDropped() {
         val left = texture(seed = 1L)
-        val right = texture(seed = 2L)
+        // A different random texture alone is only ~0.17 apart, i.e. *under* the 0.22 cut
+        // threshold (CI taught us this: a blank frame in between reads as TWO transitions).
+        // A real cut changes the frame wholesale, so the second shot is brighter as well.
+        val right = brighter(texture(seed = 2L), 0.30f)
+        assertTrue("two different random textures are not a cut on their own",
+            ShotDetector.meanAbsDiff(left, texture(seed = 2L)) < 0.22f)
+        assertTrue("a wholesale change is",
+            ShotDetector.meanAbsDiff(left, right) >= 0.22f)
+
         val frames = (0 until 4).map { i -> withPatch(left, left = 4 + i, top = 7) } +
-                listOf(flat(0.95f)) +
-                (0 until 4).map { i -> withPatch(right, left = 22 - i, top = 7) }
+                (0 until 5).map { i -> withPatch(right, left = 22 - i, top = 7) }
 
         val result = AutoFramePlanner.plan(samples(frames))
 
-        assertEquals("the cut must split the clip", 2, result.shots.size)
+        assertEquals("exactly one cut, so exactly two shots", 2, result.shots.size)
         assertTrue("the first shot ends before the cut",
             result.shots[0].endTimeMs <= result.shots[1].startTimeMs)
         assertTrue("both shots contribute to the path", result.path.size >= 2)
