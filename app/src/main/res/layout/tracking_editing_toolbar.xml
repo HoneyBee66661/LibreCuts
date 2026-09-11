@@ -67,6 +67,100 @@
             android:textColor="@color/toolTextInactive"
             android:textSize="12sp" />
 
+        <!-- Output frame / canvas preset. Chosen BEFORE tracking so the run is committed
+             straight onto the timeline with the right canvas, no second dialog. -->
+        <TextView
+            android:id="@+id/tvFrameOutputLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:paddingHorizontal="24dp"
+            android:text="@string/tracking_frame_label"
+            android:textColor="@color/textColor"
+            android:textSize="12sp" />
+
+        <HorizontalScrollView
+            android:id="@+id/frameRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:paddingHorizontal="24dp"
+            android:scrollbars="none"
+            android:fillViewport="false">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tvFrameNone"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:padding="6dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:text="@string/frame_output_none"
+                    android:textColor="@color/activeTool"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/tvFrameTiktok"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:padding="6dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:text="@string/frame_output_tiktok"
+                    android:textColor="@color/toolTextInactive"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/tvFrameYoutube"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:padding="6dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:text="@string/frame_output_youtube"
+                    android:textColor="@color/toolTextInactive"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/tvFrameIgReel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:padding="6dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:text="@string/frame_output_ig_reel"
+                    android:textColor="@color/toolTextInactive"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/tvFrameIgFeed"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:padding="6dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:text="@string/frame_output_ig_feed"
+                    android:textColor="@color/toolTextInactive"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/tvFrameIgSquare"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:padding="6dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:text="@string/frame_output_ig_square"
+                    android:textColor="@color/toolTextInactive"
+                    android:textSize="13sp" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

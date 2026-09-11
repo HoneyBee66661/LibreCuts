@@ -451,6 +451,13 @@ class VideoEditingActivity : AppCompatActivity() {
     private var trackingInProgress = false
     /** 0f = auto zoom (derived from the path), otherwise a fixed factor. */
     private var trackingZoom = 0f
+
+    /**
+     * Output frame the tracker will commit to, picked in the tracking toolbar *before*
+     * Start Tracking. [ReframeAspect.NONE] (the default) stores the track and leaves the
+     * canvas alone.
+     */
+    private var trackingFrameAspect = com.tharunbirla.librecuts.models.ReframeAspect.NONE
     private var trackingPath: List<com.tharunbirla.librecuts.models.EditOperation.KeyframePoint> = emptyList()
     private var videoMaskOverlayView: com.tharunbirla.librecuts.customviews.VideoMaskOverlayView? = null
     private var mainVideoMaskContainer: com.tharunbirla.librecuts.customviews.MaskedFrameLayout? = null
@@ -475,6 +482,18 @@ class VideoEditingActivity : AppCompatActivity() {
      */
     private val reframeProxyMaxDurationMs = 120_000L
     private var isShowingPreview = false
+
+    /**
+     * Timeline position the segmented preview was entered from.
+     *
+     * While a preview is showing, the player's own position is in preview-file time, so
+     * rebuilding the workspace media on dismiss cannot ask the player where it is — it would
+     * restore a position from the wrong clock. The entry position is remembered instead.
+     */
+    private var previewEntryPositionMs = 0L
+
+    /** Position for the next workspace rebuild to restore, overriding the player's own. */
+    private var pendingWorkspaceSeekMs: Long? = null
     private var isRenderingPreview = false
     private var previewFile: File? = null
     
@@ -1787,6 +1806,21 @@ class VideoEditingActivity : AppCompatActivity() {
                 toolbar.findViewById<TextView>(R.id.tvZoom15)?.setBounceClickListener { selectTrackingZoom(1.5f) }
                 toolbar.findViewById<TextView>(R.id.tvZoom20)?.setBounceClickListener { selectTrackingZoom(2f) }
                 toolbar.findViewById<TextView>(R.id.tvZoom30)?.setBounceClickListener { selectTrackingZoom(3f) }
+
+                // Output frame, chosen before the run starts. "None" is the default so the
+                // canvas only changes when the user asks for it.
+                toolbar.findViewById<TextView>(R.id.tvFrameNone)
+                    ?.setBounceClickListener { selectTrackingFrameAspect(com.tharunbirla.librecuts.models.ReframeAspect.NONE) }
+                toolbar.findViewById<TextView>(R.id.tvFrameTiktok)
+                    ?.setBounceClickListener { selectTrackingFrameAspect(com.tharunbirla.librecuts.models.ReframeAspect.TIKTOK_9_16) }
+                toolbar.findViewById<TextView>(R.id.tvFrameYoutube)
+                    ?.setBounceClickListener { selectTrackingFrameAspect(com.tharunbirla.librecuts.models.ReframeAspect.YOUTUBE_16_9) }
+                toolbar.findViewById<TextView>(R.id.tvFrameIgReel)
+                    ?.setBounceClickListener { selectTrackingFrameAspect(com.tharunbirla.librecuts.models.ReframeAspect.IG_REEL_9_16) }
+                toolbar.findViewById<TextView>(R.id.tvFrameIgFeed)
+                    ?.setBounceClickListener { selectTrackingFrameAspect(com.tharunbirla.librecuts.models.ReframeAspect.IG_FEED_4_5) }
+                toolbar.findViewById<TextView>(R.id.tvFrameIgSquare)
+                    ?.setBounceClickListener { selectTrackingFrameAspect(com.tharunbirla.librecuts.models.ReframeAspect.IG_SQUARE_1_1) }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Tracking toolbar not found: ${e.message}")
@@ -2877,10 +2911,13 @@ class VideoEditingActivity : AppCompatActivity() {
             )
             trackingZoom = existing.zoom
             trackingPath = existing.path
+            // Reflect the frame the track was committed with, so the row is not blank state.
+            trackingFrameAspect = existing.reframeSpec().aspect
             overlay.setTrajectory(existing.path.map { Pair(it.valueX, it.valueY) })
         } else {
             overlay.setMarkerBounds(0.3f, 0.3f, 0.4f, 0.4f)
             overlay.clearTrajectory()
+            trackingFrameAspect = com.tharunbirla.librecuts.models.ReframeAspect.NONE
         }
 
         // The overlay draws in the same box as the previewed canvas.
@@ -2913,7 +2950,7 @@ class VideoEditingActivity : AppCompatActivity() {
         editingControlsWrapper.visibility = View.VISIBLE
     }
 
-    /** Refresh hint/status, the zoom row and the Apply button for the current state. */
+    /** Refresh hint/status, the frame row, the zoom row and the Apply button for the state. */
     private fun updateTrackingUi() {
         val toolbar = trackingEditingToolbar ?: return
         val status = toolbar.findViewById<TextView>(R.id.tvTrackingStatus)
@@ -2937,6 +2974,34 @@ class VideoEditingActivity : AppCompatActivity() {
             getString(R.string.tracking_hint_mark)
         }
         highlightZoomOption(toolbar)
+        highlightFrameOption(toolbar)
+    }
+
+    /**
+     * Mark the chosen output frame. "None" is a real selection and stays lit until the user
+     * picks a ratio — the canvas is only changed on purpose.
+     */
+    private fun highlightFrameOption(toolbar: View) {
+        val chosen = when (trackingFrameAspect) {
+            com.tharunbirla.librecuts.models.ReframeAspect.TIKTOK_9_16 -> R.id.tvFrameTiktok
+            com.tharunbirla.librecuts.models.ReframeAspect.YOUTUBE_16_9 -> R.id.tvFrameYoutube
+            com.tharunbirla.librecuts.models.ReframeAspect.IG_REEL_9_16 -> R.id.tvFrameIgReel
+            com.tharunbirla.librecuts.models.ReframeAspect.IG_FEED_4_5 -> R.id.tvFrameIgFeed
+            com.tharunbirla.librecuts.models.ReframeAspect.IG_SQUARE_1_1 -> R.id.tvFrameIgSquare
+            else -> R.id.tvFrameNone
+        }
+        listOf(
+            R.id.tvFrameNone,
+            R.id.tvFrameTiktok,
+            R.id.tvFrameYoutube,
+            R.id.tvFrameIgReel,
+            R.id.tvFrameIgFeed,
+            R.id.tvFrameIgSquare
+        ).forEach { id ->
+            toolbar.findViewById<TextView>(id)?.setTextColor(
+                if (id == chosen) getColor(R.color.activeTool) else getColor(R.color.toolTextInactive)
+            )
+        }
     }
 
     private fun highlightZoomOption(toolbar: View) {
@@ -2956,6 +3021,13 @@ class VideoEditingActivity : AppCompatActivity() {
 
     private fun selectTrackingZoom(zoom: Float) {
         trackingZoom = zoom
+        updateTrackingUi()
+    }
+
+    private fun selectTrackingFrameAspect(
+        aspect: com.tharunbirla.librecuts.models.ReframeAspect
+    ) {
+        trackingFrameAspect = aspect
         updateTrackingUi()
     }
 
@@ -3078,35 +3150,81 @@ class VideoEditingActivity : AppCompatActivity() {
         exitTrackingEditingMode()
         Toast.makeText(this, R.string.tracking_applied, Toast.LENGTH_SHORT).show()
         // Whatever reframe proxy exists was baked from an older track, so drop it before the
-        // ratio choice decides what to render next.
+        // chosen output frame decides what to render next.
         viewModel.setReframeProxyUri(selectedVideoIndex ?: 0, null)
-        promptReframeRatio()
+        applyReframeAspect(trackingFrameAspect)
     }
 
     /**
-     * Ask which canvas the reframe should target.
+     * Framing spec for a toolbar choice.
      *
-     * The choice decides how the frame is allowed to *move*, not just its shape: 9:16 keeps
-     * the full height and slides sideways, 16:9 keeps the canvas and zooms/pans to follow.
+     * Everything portrait or square out of a landscape source keeps the full height and pans
+     * sideways (no zoom, nothing gets softer); same-aspect targets zoom/pan to follow. [NONE]
+     * asks the planner for a plan that touches nothing.
      */
-    private fun promptReframeRatio() {
-        val labels = arrayOf(
-            getString(R.string.reframe_ratio_tiktok),
-            getString(R.string.reframe_ratio_youtube),
-            getString(R.string.reframe_ratio_original)
-        )
-        MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.reframe_ratio_title)
-            .setItems(labels) { _, which ->
-                val spec = when (which) {
-                    0 -> com.tharunbirla.librecuts.models.ReframeSpec.TIKTOK
-                    1 -> com.tharunbirla.librecuts.models.ReframeSpec.YOUTUBE
-                    else -> com.tharunbirla.librecuts.models.ReframeSpec.ORIGINAL
-                }
-                applyReframeSpec(spec, labels[which])
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+    private fun reframeSpecFor(
+        aspect: com.tharunbirla.librecuts.models.ReframeAspect
+    ): com.tharunbirla.librecuts.models.ReframeSpec {
+        return when (aspect) {
+            com.tharunbirla.librecuts.models.ReframeAspect.TIKTOK_9_16 ->
+                com.tharunbirla.librecuts.models.ReframeSpec.TIKTOK
+            com.tharunbirla.librecuts.models.ReframeAspect.YOUTUBE_16_9 ->
+                com.tharunbirla.librecuts.models.ReframeSpec.YOUTUBE
+            com.tharunbirla.librecuts.models.ReframeAspect.IG_REEL_9_16 ->
+                com.tharunbirla.librecuts.models.ReframeSpec(
+                    com.tharunbirla.librecuts.models.ReframeAspect.IG_REEL_9_16,
+                    com.tharunbirla.librecuts.models.ReframeMode.PAN_ONLY,
+                    0f
+                )
+            com.tharunbirla.librecuts.models.ReframeAspect.IG_FEED_4_5 ->
+                com.tharunbirla.librecuts.models.ReframeSpec(
+                    com.tharunbirla.librecuts.models.ReframeAspect.IG_FEED_4_5,
+                    com.tharunbirla.librecuts.models.ReframeMode.PAN_ONLY,
+                    0f
+                )
+            com.tharunbirla.librecuts.models.ReframeAspect.IG_SQUARE_1_1 ->
+                com.tharunbirla.librecuts.models.ReframeSpec(
+                    com.tharunbirla.librecuts.models.ReframeAspect.IG_SQUARE_1_1,
+                    com.tharunbirla.librecuts.models.ReframeMode.PAN_ONLY,
+                    0f
+                )
+            com.tharunbirla.librecuts.models.ReframeAspect.ORIGINAL ->
+                com.tharunbirla.librecuts.models.ReframeSpec.ORIGINAL
+            else -> com.tharunbirla.librecuts.models.ReframeSpec(
+                com.tharunbirla.librecuts.models.ReframeAspect.NONE,
+                com.tharunbirla.librecuts.models.ReframeMode.ZOOM_PAN,
+                0f
+            )
+        }
+    }
+
+    private fun frameAspectLabel(
+        aspect: com.tharunbirla.librecuts.models.ReframeAspect
+    ): String = when (aspect) {
+        com.tharunbirla.librecuts.models.ReframeAspect.TIKTOK_9_16 -> getString(R.string.frame_output_tiktok)
+        com.tharunbirla.librecuts.models.ReframeAspect.YOUTUBE_16_9 -> getString(R.string.frame_output_youtube)
+        com.tharunbirla.librecuts.models.ReframeAspect.IG_REEL_9_16 -> getString(R.string.frame_output_ig_reel)
+        com.tharunbirla.librecuts.models.ReframeAspect.IG_FEED_4_5 -> getString(R.string.frame_output_ig_feed)
+        com.tharunbirla.librecuts.models.ReframeAspect.IG_SQUARE_1_1 -> getString(R.string.frame_output_ig_square)
+        com.tharunbirla.librecuts.models.ReframeAspect.ORIGINAL -> getString(R.string.reframe_ratio_original)
+        else -> getString(R.string.frame_output_none)
+    }
+
+    /**
+     * Turn the toolbar's output-frame choice into a timeline result.
+     *
+     * "None" is a real answer, not a missing one: the track stays on the timeline, the canvas
+     * is left alone, and the player is rebuilt from the workspace state so the preview does
+     * not keep showing an older reframe. Anything else renders the preset.
+     */
+    private fun applyReframeAspect(aspect: com.tharunbirla.librecuts.models.ReframeAspect) {
+        if (aspect.isNone) {
+            viewModel.setReframeProxyUri(selectedVideoIndex ?: 0, null)
+            Toast.makeText(this, R.string.tracking_frame_none_applied, Toast.LENGTH_SHORT).show()
+            viewModel.project.value?.let { applyWorkspaceMediaState(it) }
+            return
+        }
+        applyReframeSpec(reframeSpecFor(aspect), frameAspectLabel(aspect))
     }
 
     /**
@@ -6575,7 +6693,8 @@ class VideoEditingActivity : AppCompatActivity() {
         chunkDurationsMs = newChunkDurations
         val finalSource = com.google.android.exoplayer2.source.ConcatenatingMediaSource(*chunkedSources.toTypedArray())
 
-        val globalPos = getGlobalPosition()
+        val globalPos = pendingWorkspaceSeekMs ?: getGlobalPosition()
+        pendingWorkspaceSeekMs = null
         val wasPlaying = player.isPlaying
         
         player.setMediaSource(finalSource)
@@ -8093,7 +8212,12 @@ class VideoEditingActivity : AppCompatActivity() {
         updateUIInteractionState()
 
         previewJob = lifecycleScope.launch {
-            val seekPos = if (::player.isInitialized) player.currentPosition else 0L
+            // The entry position comes from the workspace clock. If a preview is already
+            // showing (or the rebuild that replaced it has not run yet) the player's own
+            // position is in preview-file time and must not be fed back in.
+            val seekPos = pendingWorkspaceSeekMs
+                ?: if (::player.isInitialized) player.currentPosition else 0L
+            previewEntryPositionMs = seekPos
             val previewOutput = File(cacheDir, "preview_segment_${System.currentTimeMillis()}.mp4")
 
             val cmd = viewModel.buildPreviewCommand(
@@ -8138,17 +8262,16 @@ class VideoEditingActivity : AppCompatActivity() {
     }
 
     /**
-     * Dismiss the preview and restore the original video source.
+     * Dismiss the preview and restore the *workspace* media state.
+     *
+     * It must not fall back to the raw import: the timeline owns the trim, the clip order and
+     * the baked reframe proxy, so restoring anything else silently drops the edit — the
+     * classic symptom being playback that runs past the trimmed end.
      */
     private fun dismissPreview() {
         if (!isShowingPreview) return
         isShowingPreview = false
         previewJob?.cancel()
-
-        videoUri?.let {
-            player.setMediaItem(MediaItem.fromUri(it))
-            player.prepare()
-        }
 
         try {
             tvPreviewBadge?.visibility = View.GONE
@@ -8157,6 +8280,23 @@ class VideoEditingActivity : AppCompatActivity() {
         previewFile?.delete()
         previewFile = null
         updateUIInteractionState()
+
+        // Restore the position the preview was entered from: the player is still sitting on
+        // the preview file, so its own position cannot be trusted here.
+        pendingWorkspaceSeekMs = previewEntryPositionMs
+        viewModel.project.value?.let { applyWorkspaceMediaState(it) }
+    }
+
+    /**
+     * The one way to put the *workspace media* (the timeline) on the player.
+     *
+     * Everything the user has done lives in the project: clips, trim, speed, playback proxy
+     * and reframe proxy. The imported file only ever describes the raw source, so any path
+     * that points the player at it directly loses the edit. Rebuilding through
+     * [performRenderTracks] is what keeps preview, scrubbing and playback on the same state.
+     */
+    private fun applyWorkspaceMediaState(project: VideoProject) {
+        renderTracks(project)
     }
 
     override fun onPause() {
