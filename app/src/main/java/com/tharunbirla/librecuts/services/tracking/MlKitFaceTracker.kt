@@ -85,7 +85,14 @@ class MlKitFaceTracker(
                 return@withContext empty(sampler.displayWidth, sampler.displayHeight, times.size)
             }
 
-            val selector = FaceSelector(selection.centerX, selection.centerY, selectorConfig)
+            val selector = FaceSelector(
+                seedX = selection.centerX,
+                seedY = selection.centerY,
+                config = selectorConfig,
+                // Box-less run (auto frame): the engine picks the subject, and the insist-ladder
+                // confirms it before the camera moves.
+                preferProminentFirst = request.preferProminentSubject
+            )
             val decisions = ArrayList<FaceSelector.Decision>(times.size)
             times.forEachIndexed { index, timeMs ->
                 scope.ensureActive()
@@ -110,12 +117,14 @@ class MlKitFaceTracker(
             val trace = FaceSelector.trace(times, decisions)
                 ?: return@withContext empty(sampler.displayWidth, sampler.displayHeight, times.size)
 
-            val halfW = (selection.width / 2f).coerceIn(0f, 0.5f)
-            val halfH = (selection.height / 2f).coerceIn(0f, 0.5f)
+            // Margins come from the selection — except for a full-frame selection, which would
+            // otherwise clamp every sample to the exact centre (auto frame has no box).
+            val marginW = FaceSelector.clampMargin(selection.width)
+            val marginH = FaceSelector.clampMargin(selection.height)
             val clamped = trace.centres().map { centre ->
                 Pair(
-                    centre.first.coerceIn(halfW, 1f - halfW),
-                    centre.second.coerceIn(halfH, 1f - halfH)
+                    centre.first.coerceIn(marginW, 1f - marginW),
+                    centre.second.coerceIn(marginH, 1f - marginH)
                 )
             }
 

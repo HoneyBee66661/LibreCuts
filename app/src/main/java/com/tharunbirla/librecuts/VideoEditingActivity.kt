@@ -3312,6 +3312,9 @@ class VideoEditingActivity : AppCompatActivity() {
         val videoUri = selectedClipUri(project) ?: return
         val range = selectedClipTimeRange(project)
         val crop = currentCropRegion(project)
+        // Captured up front: the toggle must not change under a running analysis.
+        val finder = subjectFinder
+        applySubjectFinder()
 
         val progressDialog = ProgressDialog(this).apply {
             setTitle(getString(R.string.tracking_auto_frame))
@@ -3322,30 +3325,19 @@ class VideoEditingActivity : AppCompatActivity() {
             show()
         }
 
+        val onProgress: (Float) -> Unit = { progress ->
+            runOnUiThread { progressDialog.progress = (progress * 100f).toInt().coerceIn(0, 100) }
+        }
+
         autoFrameInProgress = true
         lifecycleScope.launch {
-            val result = try {
-                // Decoding dominates the cost, so it goes off the main thread. Everything that
-                // decides anything is pure Kotlin inside AutoFramePlanner.
+            val outcome = try {
+                // Decoding (and, with ML Kit, inference) dominates the cost, so it runs off the
+                // main thread. Every *decision* is pure Kotlin — AutoFramePlanner or FaceSelector.
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    val sampler = com.tharunbirla.librecuts.services.perception.VideoFrameSampler
-                        .open(this@VideoEditingActivity, videoUri)
-                        ?: return@withContext null
-                    try {
-                        com.tharunbirla.librecuts.services.perception.AutoFramePlanner.plan(
-                            sampler.sampleRange(
-                                startMs = range.first,
-                                endMs = range.second,
-                                onProgress = { progress ->
-                                    runOnUiThread {
-                                        progressDialog.progress =
-                                            (progress * 100f).toInt().coerceIn(0, 100)
-                                    }
-                                }
-                            )
-                        )
-                    } finally {
-                        sampler.release()
+                    when (finder) {
+                        SubjectFinder.ML_KIT -> autoFrameByFace(videoUri, range, onProgress)
+                        SubjectFinder.CURRENT -> autoFrameByMotion(videoUri, range, onProgress)
                     }
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -3358,7 +3350,7 @@ class VideoEditingActivity : AppCompatActivity() {
                 autoFrameInProgress = false
             }
 
-            if (result == null) {
+            if (outcome == null) {
                 Toast.makeText(
                     this@VideoEditingActivity,
                     R.string.tracking_auto_frame_failed,
@@ -3366,26 +3358,26 @@ class VideoEditingActivity : AppCompatActivity() {
                 ).show()
                 return@launch
             }
-            if (result.isEmpty) {
-                // Nothing was confidently moving: no path, no guess, and say so.
+            if (outcome.path.size < 2) {
+                // Nothing was confidently found: no path, no guess, and say so. The two engines
+                // look for different things, so they get different advice.
                 Toast.makeText(
                     this@VideoEditingActivity,
-                    R.string.tracking_auto_frame_empty,
+                    if (finder == SubjectFinder.ML_KIT) {
+                        R.string.tracking_auto_frame_faces_empty
+                    } else {
+                        R.string.tracking_auto_frame_empty
+                    },
                     Toast.LENGTH_LONG
                 ).show()
                 return@launch
             }
 
-            // Planner centres are relative to the source clip; the timeline wants canvas space.
-            val mapped = result.path.map { keyframe ->
+            // Engine centres are relative to the source clip; the timeline wants canvas space.
+            val mapped = outcome.path.map { point ->
                 val canvas = com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper
-                    .toCanvas(keyframe.x, keyframe.y, crop)
-                com.tharunbirla.librecuts.models.EditOperation.KeyframePoint(
-                    timeMs = keyframe.timeMs,
-                    valueX = canvas.first,
-                    valueY = canvas.second,
-                    confidence = keyframe.confidence
-                )
+                    .toCanvas(point.valueX, point.valueY, crop)
+                point.copy(valueX = canvas.first, valueY = canvas.second)
             }
 
             // Seed the marker on the first subject position *before* storing the path: moving
@@ -3405,12 +3397,89 @@ class VideoEditingActivity : AppCompatActivity() {
             overlay.setTrajectory(mapped.map { Pair(it.valueX, it.valueY) })
             updateTrackingUi()
 
-            Toast.makeText(
-                this@VideoEditingActivity,
-                getString(R.string.tracking_auto_frame_done, mapped.size, result.shots.size),
-                Toast.LENGTH_LONG
-            ).show()
+            Toast.makeText(this@VideoEditingActivity, outcome.summary, Toast.LENGTH_LONG).show()
         }
+    }
+
+    /**
+     * What both auto-frame engines produce: a path in **source** space, plus the sentence to show
+     * when it lands. One shape is what keeps the caller engine-agnostic — the analysis is the only
+     * thing that differs, the state it fills is identical.
+     */
+    private class AutoFrameOutcome(
+        val path: List<com.tharunbirla.librecuts.models.EditOperation.KeyframePoint>,
+        val summary: String
+    )
+
+    /** Auto frame, model-free tier: shot detection + motion saliency. */
+    private suspend fun autoFrameByMotion(
+        videoUri: Uri,
+        range: Pair<Long, Long>,
+        onProgress: (Float) -> Unit
+    ): AutoFrameOutcome? {
+        val sampler = com.tharunbirla.librecuts.services.perception.VideoFrameSampler
+            .open(this, videoUri) ?: return null
+        return try {
+            val result = com.tharunbirla.librecuts.services.perception.AutoFramePlanner.plan(
+                sampler.sampleRange(range.first, range.second, onProgress = onProgress)
+            )
+            AutoFrameOutcome(
+                path = result.path.map {
+                    com.tharunbirla.librecuts.models.EditOperation.KeyframePoint(
+                        timeMs = it.timeMs,
+                        valueX = it.x,
+                        valueY = it.y,
+                        confidence = it.confidence
+                    )
+                },
+                summary = getString(
+                    R.string.tracking_auto_frame_done,
+                    result.path.size,
+                    result.shots.size
+                )
+            )
+        } finally {
+            sampler.release()
+        }
+    }
+
+    /**
+     * Auto frame, face tier: there is no box to draw, so the whole frame is the selection and the
+     * most prominent face becomes the subject.
+     *
+     * Everything after that is the policy Start Tracking already runs on — identity lock, the
+     * insist-ladder, no teleporting — and the engine emits no path at all when a face was never
+     * confirmed twice, so this cannot turn a face-less clip into a camera move.
+     */
+    private suspend fun autoFrameByFace(
+        videoUri: Uri,
+        range: Pair<Long, Long>,
+        onProgress: (Float) -> Unit
+    ): AutoFrameOutcome? {
+        val result = com.tharunbirla.librecuts.services.ObjectTrackingService.track(
+            context = this,
+            request = com.tharunbirla.librecuts.services.tracking.TrackingRequest(
+                videoUri = videoUri,
+                startTimeMs = range.first,
+                endTimeMs = range.second,
+                // No box: the frame is the search space, and the engine picks the subject.
+                selection = com.tharunbirla.librecuts.services.tracking.TrackingSelection(
+                    0f, 0f, 1f, 1f
+                ),
+                preferProminentSubject = true
+            ),
+            onProgress = onProgress
+        )
+        if (result.isEmpty) return AutoFrameOutcome(emptyList(), "")
+        return AutoFrameOutcome(
+            path = result.path,
+            summary = getString(
+                R.string.tracking_auto_frame_done_faces,
+                result.path.size,
+                result.trackedFrames,
+                result.sampledFrames
+            )
+        )
     }
 
     /** Commit the track to the timeline, then return to the main toolbar. */

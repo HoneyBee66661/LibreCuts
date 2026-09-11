@@ -30,7 +30,18 @@ class FaceSelector(
     /** Normalised centre of the box the user drew: "which face do I care about". */
     private val seedX: Float,
     private val seedY: Float,
-    private val config: Config = Config()
+    private val config: Config = Config(),
+    /**
+     * Auto frame has no box to point at, so the first lock takes the *most prominent* face
+     * instead of the one nearest the frame centre — the subject is normally the bigger, closer
+     * face, and the nearest-to-centre rule would pick whoever happens to stand in the middle.
+     *
+     * Only the *first* lock is affected: once a face is locked, identity and the insist-ladder
+     * decide as usual. The ladder still applies to that first lock (a face must be detected
+     * `minHold` samples in a row before it becomes the subject), because with no box there is no
+     * user intent to trust.
+     */
+    private val preferProminentFirst: Boolean = false
 ) {
 
     /**
@@ -101,11 +112,19 @@ class FaceSelector(
         val reopen = lastX.isNaN() || missed >= config.reacquireAfter
         val refX = if (reopen) seedX else lastX
         val refY = if (reopen) seedY else lastY
-        val best = candidates.minByOrNull { distance(it, refX, refY) } ?: return hold()
+        val best = if (preferProminentFirst && lastX.isNaN()) {
+            // No box: prominence decides who the subject is, not proximity to the centre.
+            candidates.maxByOrNull { it.area } ?: return hold()
+        } else {
+            candidates.minByOrNull { distance(it, refX, refY) } ?: return hold()
+        }
         val d = distance(best, refX, refY)
 
         // 3. First lock on a face near the box is the user's own choice: adopt immediately.
-        if (lastX.isNaN() && d <= config.jumpTolerance) return adopt(best, switched = false)
+        //    Without a box there is no such choice, so the ladder has to confirm it instead.
+        if (lastX.isNaN() && !preferProminentFirst && d <= config.jumpTolerance) {
+            return adopt(best, switched = false)
+        }
 
         // 4. A face far from where the subject was is a different subject until it insists.
         val far = !reopen && d > config.jumpTolerance
@@ -169,6 +188,26 @@ class FaceSelector(
 
     companion object {
         private const val CONFIDENT_AREA = 0.2f
+
+        /**
+         * Margin that keeps a tracked centre inside the frame.
+         *
+         * The correlator clamps to half the marked box — the patch it has to keep inside the
+         * frame. Faces have no patch, so the selection stands in for it, **except** when the
+         * selection is the whole frame (auto frame has no box, so the frame *is* the selection):
+         * clamping to half of that would pin every sample to the exact centre and produce a path
+         * that never pans. That case gets a small margin instead, because the subject may travel
+         * almost the entire frame.
+         */
+        fun clampMargin(
+            selectionSize: Float,
+            fullFrameThreshold: Float = 0.98f,
+            minMargin: Float = 0.02f
+        ): Float = if (selectionSize >= fullFrameThreshold) {
+            minMargin
+        } else {
+            (selectionSize / 2f).coerceIn(0f, 0.5f)
+        }
 
         /**
          * Drop the samples before the first confirmed sighting.

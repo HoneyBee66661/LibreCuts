@@ -177,4 +177,60 @@ class FaceSelectorTest {
         requireNotNull(trace)
         assertTrue("a face that never moves must not manufacture a moving camera", trace.isStatic())
     }
+
+    @Test
+    fun withoutABoxTheMostProminentFaceBecomesTheSubject() {
+        val frames = listOf(
+            face(0.5f, 0.5f, area = 0.02f, id = 1),   // small, dead centre
+            face(0.8f, 0.4f, area = 0.12f, id = 2)    // bigger, off-centre
+        )
+
+        // With a box at the centre the small centred face is the subject: the user pointed there.
+        val boxed = selector(FaceSelector.Config(minHold = 2))
+        assertEquals(1, (0 until 3).map { boxed.accept(frames) }.first { it.seen }.trackId)
+
+        // Auto frame has no box, so prominence decides instead — and the ladder still has to
+        // confirm the subject before the camera moves to it.
+        val auto = FaceSelector(
+            seedX = 0.5f,
+            seedY = 0.5f,
+            config = FaceSelector.Config(minHold = 2),
+            preferProminentFirst = true
+        )
+        assertFalse(auto.accept(frames).seen)
+        val adopted = auto.accept(frames)
+        assertTrue(adopted.seen)
+        assertEquals(2, adopted.trackId)
+    }
+
+    @Test
+    fun aCandidateThatKeepsChangingIsNeverAdopted() {
+        val s = FaceSelector(
+            seedX = 0.5f,
+            seedY = 0.5f,
+            config = FaceSelector.Config(minHold = 3),
+            preferProminentFirst = true
+        )
+        // A different prominent face in every sample: prominence alone must never lock the
+        // camera on, because the ladder keys on the candidate staying (place or id).
+        val eachFrame = listOf(
+            listOf(face(0.2f, 0.2f, area = 0.12f, id = 1)),
+            listOf(face(0.8f, 0.2f, area = 0.12f, id = 2)),
+            listOf(face(0.2f, 0.8f, area = 0.12f, id = 3))
+        )
+        assertTrue(eachFrame.all { !s.accept(it).seen })
+        assertEquals(0, s.seenCount)
+    }
+
+    @Test
+    fun aFullFrameSelectionDoesNotPinThePathToTheCentre() {
+        // Auto frame's selection is the whole frame. Clamping to half of it (as the correlator
+        // does with a marked box) would freeze every sample at 0.5 and emit a still path.
+        eps(0.02f, FaceSelector.clampMargin(1f))
+        // A real box keeps the correlator's rule: the subject centre stays inside the box.
+        eps(0.2f, FaceSelector.clampMargin(0.4f))
+        eps(0f, FaceSelector.clampMargin(0f))
+        // And the margin can never invert the clamp range.
+        assertTrue(FaceSelector.clampMargin(1f) <= 0.5f && FaceSelector.clampMargin(0.99f) <= 0.5f)
+    }
 }
