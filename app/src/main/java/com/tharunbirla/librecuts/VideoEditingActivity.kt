@@ -2,8 +2,10 @@ package com.tharunbirla.librecuts
 
 import android.widget.ImageView
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.ProgressDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -443,6 +445,10 @@ class VideoEditingActivity : AppCompatActivity() {
     private var speedEditingToolbar: View? = null
     private var cropEditingToolbar: View? = null
     private var cropOverlayView: com.tharunbirla.librecuts.customviews.CropOverlayView? = null
+    /** Guards against starting two tracking passes at once. */
+    private var trackingInProgress = false
+    /** Fraction of the drawn crop box used as the tracker's template region. */
+    private val trackingSubjectFraction = 0.55f
     private var videoMaskOverlayView: com.tharunbirla.librecuts.customviews.VideoMaskOverlayView? = null
     private var mainVideoMaskContainer: com.tharunbirla.librecuts.customviews.MaskedFrameLayout? = null
     private var initialCropOperation: com.tharunbirla.librecuts.models.EditOperation.Crop? = null
@@ -1743,6 +1749,9 @@ class VideoEditingActivity : AppCompatActivity() {
                     viewModel.addCropOperation("Custom", x, y, w, h)
                     updateCropUi("Custom")
                 }
+                toolbar.findViewById<LinearLayout>(R.id.frameTrackObject)?.setBounceClickListener {
+                    startObjectTracking()
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Crop editing toolbar not found: ${e.message}")
@@ -2176,6 +2185,131 @@ class VideoEditingActivity : AppCompatActivity() {
         
         btnMoveLayerUp.visibility = if (canMoveUp) View.VISIBLE else View.GONE
         btnMoveLayerDown.visibility = if (canMoveDown) View.VISIBLE else View.GONE
+    }
+
+    /**
+     * Record how the subject inside the current crop box moves, then store that path on
+     * the crop operation. The render engine pans the crop window along the path, which is
+     * what keeps the subject centered in the exported video.
+     *
+     * Phase 1 scope: tracking runs from the playhead to the end of the clip and assumes
+     * the clip plays at normal speed (speed / reverse changes are not compensated yet).
+     */
+    private fun startObjectTracking() {
+        if (trackingInProgress) return
+        val project = viewModel.project.value ?: return
+
+        // The crop box is what the user drew: it becomes both the framing and the
+        // region the tracker watches. Fall back to the stored crop op, then to center.
+        val bounds = cropOverlayView
+            ?.takeIf { it.visibility == View.VISIBLE }
+            ?.getCropBounds()
+            ?: viewModel.project.value?.operations
+                ?.filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Crop>()
+                ?.lastOrNull()
+                ?.let { floatArrayOf(it.xFraction, it.yFraction, it.wFraction, it.hFraction) }
+            ?: floatArrayOf(0.25f, 0.25f, 0.5f, 0.5f)
+
+        val boxCenterX = bounds[0] + bounds[2] / 2f
+        val boxCenterY = bounds[1] + bounds[3] / 2f
+        // Users draw the box around the framing they want, so lock onto the middle of it
+        // (where the subject is) instead of the whole, possibly background-heavy, box.
+        val subjectW = bounds[2] * trackingSubjectFraction
+        val subjectH = bounds[3] * trackingSubjectFraction
+        val selection = com.tharunbirla.librecuts.services.ObjectTrackingService.Selection(
+            left = boxCenterX - subjectW / 2f,
+            top = boxCenterY - subjectH / 2f,
+            width = subjectW,
+            height = subjectH
+        )
+
+        val startMs = if (::player.isInitialized) player.currentPosition.coerceAtLeast(0L) else 0L
+        var endMs = if (::player.isInitialized) player.duration.coerceAtLeast(0L) else 0L
+        if (endMs <= startMs + 1L) {
+            endMs = startMs + 15_000L
+        }
+        // Never track past the end of a trimmed clip.
+        project.operations
+            .filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Trim>()
+            .lastOrNull()
+            ?.let { trim -> if (trim.endMs in (startMs + 1L)..endMs) endMs = trim.endMs }
+
+        val progressDialog = ProgressDialog(this).apply {
+            setTitle(getString(R.string.tracking_title))
+            setMessage(getString(R.string.tracking_message))
+            setProgressStyle(ProgressDialog.STYLE_HORIZONTAL)
+            max = 100
+            setCancelable(false)
+            show()
+        }
+
+        trackingInProgress = true
+        lifecycleScope.launch {
+            val result = try {
+                com.tharunbirla.librecuts.services.ObjectTrackingService.track(
+                    context = this@VideoEditingActivity,
+                    request = com.tharunbirla.librecuts.services.ObjectTrackingService.Request(
+                        videoUri = project.sourceUri,
+                        startTimeMs = startMs,
+                        endTimeMs = endMs,
+                        selection = selection
+                    )
+                ) { progress ->
+                    runOnUiThread {
+                        progressDialog.progress = (progress * 100f).toInt().coerceIn(0, 100)
+                    }
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                Log.w(TAG, "Object tracking failed: ${e.message}")
+                com.tharunbirla.librecuts.services.ObjectTrackingService.Result(
+                    emptyList(), 0, 0, 0f
+                )
+            } finally {
+                progressDialog.dismiss()
+                trackingInProgress = false
+            }
+
+            if (result.isEmpty) {
+                Toast.makeText(
+                    this@VideoEditingActivity,
+                    R.string.tracking_failed,
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+
+            val existingCrop = viewModel.project.value?.operations
+                ?.filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Crop>()
+                ?.lastOrNull()
+            if (existingCrop == null) {
+                viewModel.addCropOperation("Custom", bounds[0], bounds[1], bounds[2], bounds[3])
+            }
+            val target = viewModel.project.value?.operations
+                ?.filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Crop>()
+                ?.lastOrNull()
+            if (target == null) {
+                Toast.makeText(
+                    this@VideoEditingActivity,
+                    R.string.tracking_failed,
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+
+            viewModel.updateOperation(
+                target.copy(
+                    trackingPath = result.path,
+                    trackingZoom = target.trackingZoom
+                )
+            )
+            Toast.makeText(
+                this@VideoEditingActivity,
+                getString(R.string.tracking_done, result.trackedFrames, result.sampledFrames),
+                Toast.LENGTH_LONG
+            ).show()
+        }
     }
 
     private fun applyCropPreview(aspectRatio: String) {

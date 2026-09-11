@@ -188,6 +188,32 @@
                         android:textSize="11sp" />
                 </LinearLayout>
 
+                <LinearLayout
+                    android:id="@+id/frameTrackObject"
+                    android:layout_width="60dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:orientation="vertical">
+                    <FrameLayout
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:background="@drawable/bg_aspect_ratio_item">
+                        <ImageView
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:layout_gravity="center"
+                            android:src="@drawable/ic_object_track_24"
+                            app:tint="@color/iconSecondary" />
+                    </FrameLayout>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/str_track_object"
+                        android:textColor="@color/toolTextInactive"
+                        android:textSize="11sp" />
+                </LinearLayout>
+
             </LinearLayout>
         </HorizontalScrollView>
     </LinearLayout>

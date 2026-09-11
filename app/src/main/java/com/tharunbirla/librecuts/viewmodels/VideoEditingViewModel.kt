@@ -172,6 +172,46 @@ class VideoEditingViewModel : ViewModel() {
 
     /** Build a crop filter expression for an aspect ratio. */
     private fun buildCropFilterExpr(op: EditOperation.Crop): String? {
+        // ── Tracked crop ────────────────────────────────────────────────────
+        // When a motion path is present the window pans (and is slightly zoomed in,
+        // so it has room to pan) to keep the tracked subject centered. The x/y
+        // options become time expressions, so ffmpeg re-evaluates them per frame.
+        if (op.hasTracking()) {
+            val zoom = op.trackingZoom.coerceIn(1f, 3f)
+            // Window covers wFraction/zoom of the source => zoomed in by `zoom`,
+            // while the output resolution stays iw*wFraction (same as an untracked crop).
+            val w = String.format(
+                java.util.Locale.US, "trunc(iw*%.4f/2)*2", op.wFraction / zoom
+            )
+            val h = String.format(
+                java.util.Locale.US, "trunc(ih*%.4f/2)*2", op.hFraction / zoom
+            )
+            val cxExpr = buildFFmpegInterpolationExpr(
+                op.trackingPath,
+                useValueY = false,
+                defaultValue = op.xFraction + op.wFraction / 2f,
+                startTimeMs = 0L,
+                timeVar = "t"
+            )
+            val cyExpr = buildFFmpegInterpolationExpr(
+                op.trackingPath,
+                useValueY = true,
+                defaultValue = op.yFraction + op.hFraction / 2f,
+                startTimeMs = 0L,
+                timeVar = "t"
+            )
+            // Center the window on the subject, clamped so it never leaves the frame.
+            val x = "clip(($cxExpr)*iw-($w)/2\\,0\\,iw-($w))"
+            val y = "clip(($cyExpr)*ih-($h)/2\\,0\\,ih-($h))"
+            // At zoom == 1.0 the window IS the drawn box, so no pre-scale is needed.
+            if (zoom <= 1.001f) {
+                return "crop=w=$w:h=$h:x='$x':y='$y',setsar=1"
+            }
+            val scaledW = String.format(java.util.Locale.US, "trunc(iw*%.4f/2)*2", zoom)
+            val scaledH = String.format(java.util.Locale.US, "trunc(ih*%.4f/2)*2", zoom)
+            return "scale=$scaledW:$scaledH,crop=w=$w:h=$h:x='$x':y='$y',setsar=1"
+        }
+
         val hasCustomBounds = op.aspectRatio == "Custom" || op.xFraction > 0f || op.yFraction > 0f || op.wFraction < 1f || op.hFraction < 1f
         if (hasCustomBounds) {
             val w = String.format(java.util.Locale.US, "trunc(iw*%.4f/2)*2", op.wFraction)
