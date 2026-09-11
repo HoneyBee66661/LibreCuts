@@ -482,6 +482,18 @@ class VideoEditingActivity : AppCompatActivity() {
      */
     private val reframeProxyMaxDurationMs = 120_000L
     private var isShowingPreview = false
+
+    /**
+     * Timeline position the segmented preview was entered from.
+     *
+     * While a preview is showing, the player's own position is in preview-file time, so
+     * rebuilding the workspace media on dismiss cannot ask the player where it is — it would
+     * restore a position from the wrong clock. The entry position is remembered instead.
+     */
+    private var previewEntryPositionMs = 0L
+
+    /** Position for the next workspace rebuild to restore, overriding the player's own. */
+    private var pendingWorkspaceSeekMs: Long? = null
     private var isRenderingPreview = false
     private var previewFile: File? = null
     
@@ -6681,7 +6693,8 @@ class VideoEditingActivity : AppCompatActivity() {
         chunkDurationsMs = newChunkDurations
         val finalSource = com.google.android.exoplayer2.source.ConcatenatingMediaSource(*chunkedSources.toTypedArray())
 
-        val globalPos = getGlobalPosition()
+        val globalPos = pendingWorkspaceSeekMs ?: getGlobalPosition()
+        pendingWorkspaceSeekMs = null
         val wasPlaying = player.isPlaying
         
         player.setMediaSource(finalSource)
@@ -8199,7 +8212,12 @@ class VideoEditingActivity : AppCompatActivity() {
         updateUIInteractionState()
 
         previewJob = lifecycleScope.launch {
-            val seekPos = if (::player.isInitialized) player.currentPosition else 0L
+            // The entry position comes from the workspace clock. If a preview is already
+            // showing (or the rebuild that replaced it has not run yet) the player's own
+            // position is in preview-file time and must not be fed back in.
+            val seekPos = pendingWorkspaceSeekMs
+                ?: if (::player.isInitialized) player.currentPosition else 0L
+            previewEntryPositionMs = seekPos
             val previewOutput = File(cacheDir, "preview_segment_${System.currentTimeMillis()}.mp4")
 
             val cmd = viewModel.buildPreviewCommand(
@@ -8263,6 +8281,9 @@ class VideoEditingActivity : AppCompatActivity() {
         previewFile = null
         updateUIInteractionState()
 
+        // Restore the position the preview was entered from: the player is still sitting on
+        // the preview file, so its own position cannot be trusted here.
+        pendingWorkspaceSeekMs = previewEntryPositionMs
         viewModel.project.value?.let { applyWorkspaceMediaState(it) }
     }
 
