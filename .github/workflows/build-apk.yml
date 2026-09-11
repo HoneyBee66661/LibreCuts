@@ -1,0 +1,54 @@
+name: Build APK (own)
+
+# Build APK punya sendiri. Jalan otomatis tiap push, atau manual dari tab Actions.
+# Artifact sengaja difilter arm64-v8a saja (HP-nya arm64) supaya download-nya kecil.
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "variant yang dibuild"
+        required: true
+        default: "debug"
+        type: choice
+        options: [debug, release]
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: own-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Build APK
+        run: |
+          chmod +x gradlew
+          VARIANT="${{ inputs.variant }}"
+          if [ -z "$VARIANT" ]; then VARIANT="debug"; fi
+          echo "Building variant: $VARIANT"
+          ./gradlew "assemble${VARIANT^}" --no-daemon
+
+      - name: List semua APK hasil build
+        run: find app/build/outputs/apk -name '*.apk' -exec ls -lh {} \;
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: LibreCuts-arm64-${{ inputs.variant || 'debug' }}-${{ github.run_number }}
+          path: app/build/outputs/apk/**/*arm64*.apk
+          if-no-files-found: error
+          retention-days: 30
