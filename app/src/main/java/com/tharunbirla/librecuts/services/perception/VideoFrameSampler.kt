@@ -47,10 +47,10 @@ class VideoFrameSampler private constructor(
         var scaled: Bitmap? = null
         try {
             val alreadyOriented = bitmap.width == displayWidth && bitmap.height == displayHeight
-            oriented = if (rotation != 0 && !alreadyOriented) {
+            oriented = if (rotationDegrees != 0 && !alreadyOriented) {
                 Bitmap.createBitmap(
                     bitmap, 0, 0, bitmap.width, bitmap.height,
-                    Matrix().apply { postRotate(rotation.toFloat()) }, true
+                    Matrix().apply { postRotate(rotationDegrees.toFloat()) }, true
                 )
             } else {
                 bitmap
