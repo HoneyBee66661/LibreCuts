@@ -89,6 +89,17 @@ object ReframePlanner {
         }
 
         val zoom = when {
+            // DP: solve the whole path first and buy the reach the path needs with one steady
+            // zoom level. Deliberately checked *before* the pan-only rule — that rule forces
+            // zoom = 1, which leaves the window pinned at the edge whenever the subject walks
+            // to the frame edge, and the whole point of this mode is to stop doing that.
+            spec.pathModeOr() == com.tharunbirla.librecuts.models.PathMode.DP ->
+                CameraPathSolver.solve(
+                    keyframes = keyframes,
+                    baseFractionW = baseFractionW,
+                    baseFractionH = baseFractionH,
+                    maxZoom = ReframeSpec.MAX_ZOOM
+                ).constantZoom
             // Sliding a locked-height window needs no zoom: the "no zoom" rule is what
             // keeps the TikTok path sharp.
             spec.mode == ReframeMode.PAN_ONLY -> 1f
