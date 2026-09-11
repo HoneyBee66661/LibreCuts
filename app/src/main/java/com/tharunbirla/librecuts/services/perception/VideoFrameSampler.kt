@@ -74,6 +74,72 @@ class VideoFrameSampler private constructor(
     }
 
     /**
+     * Colour frame at [width] px wide, rotation applied — for engines that need pixels rather
+     * than luminance (face detection, colour-aware tracking).
+     *
+     * **The caller owns the bitmap and must recycle it**: the sampler cannot know when a
+     * detector has finished with it. Everything it allocated on the way is recycled here.
+     */
+    fun sampleBitmap(timeMs: Long, width: Int = analysisWidth): Bitmap? {
+        val bitmap = runCatching {
+            retriever.getFrameAtTime(timeMs * 1000L, MediaMetadataRetriever.OPTION_CLOSEST)
+        }.getOrNull() ?: return null
+
+        var oriented: Bitmap? = null
+        var scaled: Bitmap? = null
+        var handedOut: Bitmap? = null
+        try {
+            val alreadyOriented = bitmap.width == displayWidth && bitmap.height == displayHeight
+            oriented = if (rotationDegrees != 0 && !alreadyOriented) {
+                Bitmap.createBitmap(
+                    bitmap, 0, 0, bitmap.width, bitmap.height,
+                    Matrix().apply { postRotate(rotationDegrees.toFloat()) }, true
+                )
+            } else {
+                bitmap
+            }
+
+            val targetW = min(width, oriented.width).coerceAtLeast(48)
+            val targetH = max(1, (oriented.height.toFloat() * targetW / oriented.width).toInt())
+            scaled = if (oriented.width != targetW || oriented.height != targetH) {
+                Bitmap.createScaledBitmap(oriented, targetW, targetH, true)
+            } else {
+                oriented
+            }
+
+            handedOut = scaled
+            return scaled
+        } catch (t: Throwable) {
+            handedOut = null
+            return null
+        } finally {
+            // Never recycle the bitmap we are handing out; recycle everything else.
+            runCatching { if (scaled != null && scaled !== handedOut && scaled !== oriented && scaled !== bitmap) scaled.recycle() }
+            runCatching { if (oriented != null && oriented !== handedOut && oriented !== bitmap) oriented.recycle() }
+            runCatching { if (bitmap !== handedOut) bitmap.recycle() }
+        }
+    }
+
+    /**
+     * The sample grid for [startMs]..[endMs] at [fps], clamped to the clip.
+     *
+     * Shared by every engine so two engines never disagree about *when* they looked — a
+     * comparison between them would otherwise measure the grids, not the algorithms.
+     */
+    fun sampleTimes(
+        startMs: Long = 0L,
+        endMs: Long = durationMs,
+        fps: Int = ANALYSIS_FPS
+    ): List<Long> {
+        val from = startMs.coerceIn(0L, durationMs)
+        val to = endMs.coerceIn(from, durationMs)
+        val step = max(1L, 1000L / fps.coerceIn(1, 30))
+        if (to <= from) return emptyList()
+        val times = generateSequence(from) { it + step }.takeWhile { it <= to }.toList()
+        return if (times.size < 2) emptyList() else times
+    }
+
+    /**
      * Samples the whole clip (or the [startMs]..[endMs] range) at [fps] into planner input.
      *
      * @param onProgress 0..1, called sparsely — decoding is the slow part and the UI needs it.
@@ -84,13 +150,8 @@ class VideoFrameSampler private constructor(
         fps: Int = ANALYSIS_FPS,
         onProgress: (Float) -> Unit = {}
     ): List<AutoFramePlanner.Sample> {
-        val from = startMs.coerceIn(0L, durationMs)
-        val to = endMs.coerceIn(from, durationMs)
-        val step = max(1L, 1000L / fps.coerceIn(1, 30))
-        if (to <= from) return emptyList()
-
-        val times = generateSequence(from) { it + step }.takeWhile { it <= to }.toList()
-        if (times.size < 2) return emptyList()
+        val times = sampleTimes(startMs, endMs, fps)
+        if (times.isEmpty()) return emptyList()
 
         val out = ArrayList<AutoFramePlanner.Sample>(times.size)
         times.forEachIndexed { i, t ->

@@ -205,6 +205,58 @@
                 android:textSize="13sp" />
         </LinearLayout>
 
+        <!-- Which engine finds the subject. A real trade-off, not a preference: "Current" is the
+             built-in template matcher (no model, no extra APK size, loses the subject on rotation
+             or low texture); "ML Kit" is on-device face detection (+~7 MB) which holds through
+             both. The choice is remembered between sessions. -->
+        <TextView
+            android:id="@+id/tvEngineLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:paddingHorizontal="24dp"
+            android:text="@string/tracking_engine_label"
+            android:textColor="@color/textColor"
+            android:textSize="12sp" />
+
+        <HorizontalScrollView
+            android:id="@+id/engineRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:paddingHorizontal="24dp"
+            android:scrollbars="none"
+            android:fillViewport="false">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tvEngineCurrent"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:padding="6dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:text="@string/tracking_engine_current"
+                    android:textColor="@color/activeTool"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/tvEngineMlKit"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:padding="6dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:text="@string/tracking_engine_mlkit"
+                    android:textColor="@color/toolTextInactive"
+                    android:textSize="13sp" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

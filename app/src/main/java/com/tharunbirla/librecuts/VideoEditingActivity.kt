@@ -460,6 +460,21 @@ class VideoEditingActivity : AppCompatActivity() {
     private val autoFrameMarkerSize = 0.25f
 
     /**
+     * Which engine answers "where is the subject?" for a tracking run.
+     *
+     * A real trade-off, so it is the user's choice and it is remembered: [CURRENT] is the
+     * built-in template matcher (no model, no APK cost, loses the subject on rotation or low
+     * texture), [ML_KIT] is on-device face detection (+~7 MB, holds through both). Both feed the
+     * same [com.tharunbirla.librecuts.services.tracking.TrackingEngine] contract, so the choice
+     * changes nothing downstream.
+     */
+    private enum class SubjectFinder { CURRENT, ML_KIT }
+
+    private var subjectFinder = SubjectFinder.CURRENT
+    /** SharedPreferences key for [subjectFinder] — a preference, so it survives the process. */
+    private val subjectFinderPrefKey = "subject_finder"
+
+    /**
      * Output frame the tracker will commit to, picked in the tracking toolbar *before*
      * Start Tracking. [ReframeAspect.NONE] (the default) stores the track and leaves the
      * canvas alone.
@@ -606,6 +621,15 @@ class VideoEditingActivity : AppCompatActivity() {
         } else {
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         }
+
+        // Subject finder: restore the remembered choice and point the tracking service at it
+        // before any run can happen.
+        subjectFinder = if (prefs.getString(subjectFinderPrefKey, null) == SubjectFinder.ML_KIT.name) {
+            SubjectFinder.ML_KIT
+        } else {
+            SubjectFinder.CURRENT
+        }
+        applySubjectFinder()
 
         // Initialize ViewModel and engine
         viewModel = ViewModelProvider(this).get(VideoEditingViewModel::class.java)
@@ -1828,6 +1852,11 @@ class VideoEditingActivity : AppCompatActivity() {
                 toolbar.findViewById<Button>(R.id.btnAutoFrame)?.setBounceClickListener {
                     startAutoFrameRun()
                 }
+                // Subject finder: which engine answers "where is the subject" for a run.
+                toolbar.findViewById<TextView>(R.id.tvEngineCurrent)
+                    ?.setBounceClickListener { selectSubjectFinder(SubjectFinder.CURRENT) }
+                toolbar.findViewById<TextView>(R.id.tvEngineMlKit)
+                    ?.setBounceClickListener { selectSubjectFinder(SubjectFinder.ML_KIT) }
                 toolbar.findViewById<ImageButton>(R.id.btnApplyTracking)?.setBounceClickListener {
                     applyObjectTracking()
                 }
@@ -3013,6 +3042,7 @@ class VideoEditingActivity : AppCompatActivity() {
         highlightZoomOption(toolbar)
         highlightFrameOption(toolbar)
         highlightPathOption(toolbar)
+        highlightSubjectFinderOption(toolbar)
     }
 
     /**
@@ -3094,6 +3124,52 @@ class VideoEditingActivity : AppCompatActivity() {
         updateTrackingUi()
     }
 
+    /**
+     * Mark the active subject finder.
+     *
+     * Not cosmetic: it swaps the engine behind `ObjectTrackingService`, and it is persisted
+     * because it is a working preference — how much APK you are willing to carry for robustness —
+     * rather than a per-clip decision.
+     */
+    private fun highlightSubjectFinderOption(toolbar: View) {
+        val mlKit = subjectFinder == SubjectFinder.ML_KIT
+        listOf(
+            R.id.tvEngineCurrent to !mlKit,
+            R.id.tvEngineMlKit to mlKit
+        ).forEach { (id, selected) ->
+            toolbar.findViewById<TextView>(id)?.setTextColor(
+                if (selected) getColor(R.color.activeTool) else getColor(R.color.toolTextInactive)
+            )
+        }
+    }
+
+    private fun selectSubjectFinder(finder: SubjectFinder) {
+        subjectFinder = finder
+        applySubjectFinder()
+        getSharedPreferences("librecuts_prefs", MODE_PRIVATE)
+            .edit()
+            .putString(subjectFinderPrefKey, finder.name)
+            .apply()
+        updateTrackingUi()
+    }
+
+    /**
+     * Point the tracking service at the chosen engine.
+     *
+     * Idempotent and cheap, so it runs both when the choice changes and immediately before every
+     * run: the run-time call is what guarantees the engine matches the UI even after the activity
+     * was recreated by the system.
+     */
+    private fun applySubjectFinder() {
+        com.tharunbirla.librecuts.services.ObjectTrackingService.engine =
+            when (subjectFinder) {
+                SubjectFinder.ML_KIT ->
+                    com.tharunbirla.librecuts.services.tracking.MlKitFaceTracker()
+                SubjectFinder.CURRENT ->
+                    com.tharunbirla.librecuts.services.tracking.TemplateMatchTracker()
+            }
+    }
+
     /** Mirror of TrackObject.autoZoom() so the status label shows the same number. */
     private fun autoZoomFor(
         path: List<com.tharunbirla.librecuts.models.EditOperation.KeyframePoint>
@@ -3114,6 +3190,9 @@ class VideoEditingActivity : AppCompatActivity() {
         val project = viewModel.project.value ?: return
         val overlay = objectTrackingOverlayView ?: return
         if (overlay.visibility != View.VISIBLE) return
+
+        // Use the engine the toolbar says is selected, whatever the process did earlier.
+        applySubjectFinder()
 
         // The marker lives in canvas space; the tracker works on the source clip, so map
         // across the current crop (identity when the clip is not cropped).
@@ -3170,9 +3249,14 @@ class VideoEditingActivity : AppCompatActivity() {
             }
 
             if (result.isEmpty) {
+                // The two engines fail for different reasons, so they get different advice.
                 Toast.makeText(
                     this@VideoEditingActivity,
-                    R.string.tracking_failed,
+                    if (subjectFinder == SubjectFinder.ML_KIT) {
+                        R.string.tracking_engine_mlkit_empty
+                    } else {
+                        R.string.tracking_failed
+                    },
                     Toast.LENGTH_LONG
                 ).show()
                 return@launch
@@ -3295,7 +3379,7 @@ class VideoEditingActivity : AppCompatActivity() {
             // Planner centres are relative to the source clip; the timeline wants canvas space.
             val mapped = result.path.map { keyframe ->
                 val canvas = com.tharunbirla.librecuts.services.tracking.SourceCanvasMapper
-                    .toCanvas(keyframe.valueX, keyframe.valueY, crop)
+                    .toCanvas(keyframe.x, keyframe.y, crop)
                 com.tharunbirla.librecuts.models.EditOperation.KeyframePoint(
                     timeMs = keyframe.timeMs,
                     valueX = canvas.first,

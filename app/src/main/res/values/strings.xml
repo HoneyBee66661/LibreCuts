@@ -102,6 +102,10 @@
     <string name="frame_output_none_hint">Frame output: none. The track is stored, the canvas is untouched.</string>
     <string name="tracking_frame_none_applied">Frame output: none — track stored, canvas unchanged</string>
     <string name="tracking_path_label">Camera path</string>
+    <string name="tracking_engine_label">Subject finder</string>
+    <string name="tracking_engine_current">Current — fast</string>
+    <string name="tracking_engine_mlkit">ML Kit faces — accurate (+7 MB)</string>
+    <string name="tracking_engine_mlkit_empty">No face found in the box. Put the box on a face, or switch the subject finder back to Current.</string>
     <string name="tracking_path_clamp">Clamp — pin at edge</string>
     <string name="tracking_path_dp">DP — stay centred</string>
     <string name="reframe_rendering">Applying reframe to the timeline…</string>
