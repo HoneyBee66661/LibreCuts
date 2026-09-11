@@ -458,6 +458,16 @@ class VideoEditingActivity : AppCompatActivity() {
      * canvas alone.
      */
     private var trackingFrameAspect = com.tharunbirla.librecuts.models.ReframeAspect.NONE
+
+    /**
+     * How the camera path is decided, picked in the same toolbar.
+     *
+     * CLAMP is the default because it is the behaviour every existing track was made with —
+     * switching the default silently would change how saved projects render. DP is the
+     * better framing (subject stays centred through the whole traverse) at the cost of one
+     * steady push-in, so it is offered rather than imposed.
+     */
+    private var trackingPathMode = com.tharunbirla.librecuts.models.PathMode.CLAMP
     private var trackingPath: List<com.tharunbirla.librecuts.models.EditOperation.KeyframePoint> = emptyList()
     private var videoMaskOverlayView: com.tharunbirla.librecuts.customviews.VideoMaskOverlayView? = null
     private var mainVideoMaskContainer: com.tharunbirla.librecuts.customviews.MaskedFrameLayout? = null
@@ -1821,6 +1831,12 @@ class VideoEditingActivity : AppCompatActivity() {
                     ?.setBounceClickListener { selectTrackingFrameAspect(com.tharunbirla.librecuts.models.ReframeAspect.IG_FEED_4_5) }
                 toolbar.findViewById<TextView>(R.id.tvFrameIgSquare)
                     ?.setBounceClickListener { selectTrackingFrameAspect(com.tharunbirla.librecuts.models.ReframeAspect.IG_SQUARE_1_1) }
+
+                // Camera path mode. Clamp stays the default so existing tracks render unchanged.
+                toolbar.findViewById<TextView>(R.id.tvPathClamp)
+                    ?.setBounceClickListener { selectTrackingPathMode(com.tharunbirla.librecuts.models.PathMode.CLAMP) }
+                toolbar.findViewById<TextView>(R.id.tvPathDp)
+                    ?.setBounceClickListener { selectTrackingPathMode(com.tharunbirla.librecuts.models.PathMode.DP) }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Tracking toolbar not found: ${e.message}")
@@ -2913,11 +2929,13 @@ class VideoEditingActivity : AppCompatActivity() {
             trackingPath = existing.path
             // Reflect the frame the track was committed with, so the row is not blank state.
             trackingFrameAspect = existing.reframeSpec().aspect
+            trackingPathMode = existing.reframeSpec().pathModeOr()
             overlay.setTrajectory(existing.path.map { Pair(it.valueX, it.valueY) })
         } else {
             overlay.setMarkerBounds(0.3f, 0.3f, 0.4f, 0.4f)
             overlay.clearTrajectory()
             trackingFrameAspect = com.tharunbirla.librecuts.models.ReframeAspect.NONE
+            trackingPathMode = com.tharunbirla.librecuts.models.PathMode.CLAMP
         }
 
         // The overlay draws in the same box as the previewed canvas.
@@ -2975,6 +2993,27 @@ class VideoEditingActivity : AppCompatActivity() {
         }
         highlightZoomOption(toolbar)
         highlightFrameOption(toolbar)
+        highlightPathOption(toolbar)
+    }
+
+    /**
+     * Mark the chosen camera-path mode.
+     *
+     * The two options are a real trade-off, not a preference: CLAMP never softens the image
+     * but lets the subject drift off centre at the frame edge; DP keeps the subject centred
+     * by buying reach with one steady push-in. Both are stored on the track, so the choice
+     * travels to export.
+     */
+    private fun highlightPathOption(toolbar: View) {
+        val dpSelected = trackingPathMode == com.tharunbirla.librecuts.models.PathMode.DP
+        listOf(
+            R.id.tvPathClamp to !dpSelected,
+            R.id.tvPathDp to dpSelected
+        ).forEach { (id, selected) ->
+            toolbar.findViewById<TextView>(id)?.setTextColor(
+                if (selected) getColor(R.color.activeTool) else getColor(R.color.toolTextInactive)
+            )
+        }
     }
 
     /**
@@ -3028,6 +3067,11 @@ class VideoEditingActivity : AppCompatActivity() {
         aspect: com.tharunbirla.librecuts.models.ReframeAspect
     ) {
         trackingFrameAspect = aspect
+        updateTrackingUi()
+    }
+
+    private fun selectTrackingPathMode(mode: com.tharunbirla.librecuts.models.PathMode) {
+        trackingPathMode = mode
         updateTrackingUi()
     }
 
@@ -3224,7 +3268,13 @@ class VideoEditingActivity : AppCompatActivity() {
             viewModel.project.value?.let { applyWorkspaceMediaState(it) }
             return
         }
-        applyReframeSpec(reframeSpecFor(aspect), frameAspectLabel(aspect))
+        // The path mode travels with the framing decision: it lands on the same op and reaches
+        // the planner (proxy render and export) through spec.pathModeOr(), so the two render
+        // paths cannot disagree.
+        applyReframeSpec(
+            reframeSpecFor(aspect).copy(pathMode = trackingPathMode),
+            frameAspectLabel(aspect)
+        )
     }
 
     /**

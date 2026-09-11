@@ -96,6 +96,9 @@
     <string name="frame_output_ig_square">IG Post 1:1</string>
     <string name="frame_output_none_hint">Frame output: none. The track is stored, the canvas is untouched.</string>
     <string name="tracking_frame_none_applied">Frame output: none — track stored, canvas unchanged</string>
+    <string name="tracking_path_label">Camera path</string>
+    <string name="tracking_path_clamp">Clamp — pin at edge</string>
+    <string name="tracking_path_dp">DP — stay centred</string>
     <string name="reframe_rendering">Applying reframe to the timeline…</string>
     <string name="reframe_failed">Could not apply the reframe to the timeline. The export will still use it.</string>
     <string name="reframe_preview_only">Clip is long, so only the preview shows the reframe — export still applies it.</string>
