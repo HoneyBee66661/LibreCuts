@@ -6,10 +6,9 @@ import com.tharunbirla.librecuts.services.tracking.TemplateMatchTracker
 import com.tharunbirla.librecuts.services.tracking.TrackingEngine
 import com.tharunbirla.librecuts.services.tracking.TrackingRequest
 import com.tharunbirla.librecuts.services.tracking.TrackingResult
-import com.tharunbirla.librecuts.services.tracking.TrackingSelection
 
 /**
- * Entry point the UI talks to.
+ * Entry point the UI talks to for tracking.
  *
  * Deliberately thin: it forwards to a [TrackingEngine] and translates the result into the
  * keyframe model the project stores. All the tracking *algorithm* lives behind the engine
@@ -17,16 +16,11 @@ import com.tharunbirla.librecuts.services.tracking.TrackingSelection
  * `services/reframe` — this object owns neither, so replacing either one leaves this file
  * untouched.
  *
- * The legacy nested names ([Selection], [Request], [Result]) are kept so existing call
- * sites keep compiling while reading as plain aliases of the new model types.
+ * Callers build a `TrackingRequest` with a `TrackingSelection` (see `services/tracking`);
+ * Kotlin does not allow type aliases nested inside an object, so there are deliberately no
+ * legacy shorthands here.
  */
 object ObjectTrackingService {
-
-    /** Box to track, relative to the display-oriented frame (0..1). */
-    typealias Selection = TrackingSelection
-
-    /** Everything a tracking run needs. */
-    typealias Request = TrackingRequest
 
     /**
      * Tracking output in the shape the project model stores.
@@ -50,7 +44,9 @@ object ObjectTrackingService {
 
         companion object {
             fun from(result: TrackingResult): Result = Result(
-                path = result.points.map { EditOperation.KeyframePoint(it.timeMs, it.x, it.y, confidence = it.confidence) },
+                path = result.points.map {
+                    EditOperation.KeyframePoint(it.timeMs, it.x, it.y, confidence = it.confidence)
+                },
                 sampledFrames = result.sampledFrames,
                 trackedFrames = result.trackedFrames,
                 averageConfidence = result.averageConfidence,
@@ -70,13 +66,13 @@ object ObjectTrackingService {
     var engine: TrackingEngine = TemplateMatchTracker()
 
     /**
-     * Follow [Request.selection] through the clip.
+     * Follow [TrackingRequest.selection] through the clip.
      *
      * @param onProgress receives 0f..1f as sampling advances; called from a background thread.
      */
     suspend fun track(
         context: Context,
-        request: Request,
+        request: TrackingRequest,
         onProgress: (Float) -> Unit = {}
     ): Result {
         if (request.selection.width <= 0f || request.selection.height <= 0f) {

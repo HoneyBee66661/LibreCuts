@@ -2991,7 +2991,7 @@ class VideoEditingActivity : AppCompatActivity() {
         val cropH = (crop?.hFraction ?: 1f).coerceAtLeast(0.01f)
 
         val marker = overlay.getMarkerBounds()
-        val selection = com.tharunbirla.librecuts.services.ObjectTrackingService.Selection(
+        val selection = com.tharunbirla.librecuts.services.tracking.TrackingSelection(
             left = cropX + marker[0] * cropW,
             top = cropY + marker[1] * cropH,
             width = marker[2] * cropW,
@@ -3015,7 +3015,7 @@ class VideoEditingActivity : AppCompatActivity() {
             val result = try {
                 com.tharunbirla.librecuts.services.ObjectTrackingService.track(
                     context = this@VideoEditingActivity,
-                    request = com.tharunbirla.librecuts.services.ObjectTrackingService.Request(
+                    request = com.tharunbirla.librecuts.services.tracking.TrackingRequest(
                         videoUri = videoUri,
                         startTimeMs = range.first,
                         endTimeMs = range.second,
