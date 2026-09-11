@@ -63,12 +63,57 @@ sealed class EditOperation : Serializable {
         val yFraction: Float = 0f,
         val wFraction: Float = 1f,
         val hFraction: Float = 1f,
+        /**
+         * Optional motion path recorded by ObjectTrackingService: the tracked subject's
+         * center in relative (0..1) source coordinates, sampled over the project timeline.
+         * When non-empty, the crop window follows this path so the subject stays centered.
+         * Empty by default so projects without tracking behave exactly as before.
+         */
+        val trackingPath: List<KeyframePoint> = emptyList(),
+        /** Extra magnification applied while tracking, so the window has room to pan. */
+        val trackingZoom: Float = 1f,
         val id: String = System.nanoTime().toString()
     ) : EditOperation() {
         init {
             require(aspectRatio in listOf("16:9", "9:16", "1:1", "Custom")) { 
                 "Unsupported aspect ratio: $aspectRatio" 
             }
+            require(trackingZoom in 1f..3f) { "trackingZoom must be in 1.0..3.0" }
+        }
+
+        /**
+         * True when a motion path has enough points to drive an animated crop.
+         * Null-safe because projects saved before this field existed deserialize
+         * without it (Gson bypasses the constructor defaults).
+         */
+        fun hasTracking(): Boolean {
+            val path: List<KeyframePoint>? = trackingPath
+            return path != null && path.size >= 2
+        }
+
+        /**
+         * Interpolated subject center in relative (0..1) coordinates at the given
+         * project-timeline time. Falls back to the static crop center when untracked.
+         */
+        fun trackCenterAt(timeMs: Long): Pair<Float, Float> {
+            val staticCenter = Pair(xFraction + wFraction / 2f, yFraction + hFraction / 2f)
+            val path: List<KeyframePoint>? = trackingPath
+            if (path.isNullOrEmpty()) return staticCenter
+            val sorted = path.sortedBy { it.timeMs }
+            if (timeMs <= sorted.first().timeMs) return Pair(sorted.first().valueX, sorted.first().valueY)
+            if (timeMs >= sorted.last().timeMs) return Pair(sorted.last().valueX, sorted.last().valueY)
+            for (i in 0 until sorted.size - 1) {
+                val k1 = sorted[i]
+                val k2 = sorted[i + 1]
+                if (timeMs >= k1.timeMs && timeMs <= k2.timeMs) {
+                    val progress = (timeMs - k1.timeMs).toFloat() / (k2.timeMs - k1.timeMs).toFloat()
+                    return Pair(
+                        k1.valueX + progress * (k2.valueX - k1.valueX),
+                        k1.valueY + progress * (k2.valueY - k1.valueY)
+                    )
+                }
+            }
+            return staticCenter
         }
     }
     
