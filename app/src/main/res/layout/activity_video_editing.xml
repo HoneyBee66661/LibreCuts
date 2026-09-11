@@ -215,6 +215,12 @@
                 android:layout_height="match_parent"
                 android:visibility="gone" />
 
+            <com.tharunbirla.librecuts.customviews.ObjectTrackingOverlayView
+                android:id="@+id/objectTrackingOverlayView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:visibility="gone" />
+
             <com.tharunbirla.librecuts.customviews.VideoMaskOverlayView
                 android:id="@+id/videoMaskOverlayView"
                 android:layout_width="match_parent"
@@ -582,6 +588,15 @@
         <include
             android:id="@+id/cropEditingToolbar"
             layout="@layout/crop_editing_toolbar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:visibility="gone" />
+
+        <!-- Object Tracking Toolbar (its own mode, not part of crop; hidden by default) -->
+        <include
+            android:id="@+id/trackingEditingToolbar"
+            layout="@layout/tracking_editing_toolbar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"

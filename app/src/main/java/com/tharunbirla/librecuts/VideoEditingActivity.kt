@@ -2,8 +2,10 @@ package com.tharunbirla.librecuts
 
 import android.widget.ImageView
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.ProgressDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -443,6 +445,13 @@ class VideoEditingActivity : AppCompatActivity() {
     private var speedEditingToolbar: View? = null
     private var cropEditingToolbar: View? = null
     private var cropOverlayView: com.tharunbirla.librecuts.customviews.CropOverlayView? = null
+    // Object tracking is its own mode: separate toolbar, separate overlay, separate operation.
+    private var trackingEditingToolbar: View? = null
+    private var objectTrackingOverlayView: com.tharunbirla.librecuts.customviews.ObjectTrackingOverlayView? = null
+    private var trackingInProgress = false
+    /** 0f = auto zoom (derived from the path), otherwise a fixed factor. */
+    private var trackingZoom = 0f
+    private var trackingPath: List<com.tharunbirla.librecuts.models.EditOperation.KeyframePoint> = emptyList()
     private var videoMaskOverlayView: com.tharunbirla.librecuts.customviews.VideoMaskOverlayView? = null
     private var mainVideoMaskContainer: com.tharunbirla.librecuts.customviews.MaskedFrameLayout? = null
     private var initialCropOperation: com.tharunbirla.librecuts.models.EditOperation.Crop? = null
@@ -1476,6 +1485,10 @@ class VideoEditingActivity : AppCompatActivity() {
                 toolbar.findViewById<ImageButton>(R.id.btnVideoMask)?.setBounceClickListener {
                     showMaskBottomSheet()
                 }
+                // Object tracking: opens its own mode (marker + Start Tracking), not crop.
+                toolbar.findViewById<ImageButton>(R.id.btnVideoTracking)?.setBounceClickListener {
+                    enterTrackingEditingMode()
+                }
                 toolbar.findViewById<ImageButton>(R.id.btnVideoAdjust)?.setBounceClickListener {
                     selectedVideoIndex?.let { index ->
                         showAdjustSelectionDialog(index)
@@ -1746,6 +1759,36 @@ class VideoEditingActivity : AppCompatActivity() {
             }
         } catch (e: Exception) {
             Log.w(TAG, "Crop editing toolbar not found: ${e.message}")
+            null
+        }
+
+        trackingEditingToolbar = try {
+            findViewById<View>(R.id.trackingEditingToolbar)?.also { toolbar ->
+                toolbar.findViewById<ImageButton>(R.id.btnCloseTracking)?.setBounceClickListener {
+                    exitTrackingEditingMode()
+                }
+                toolbar.findViewById<Button>(R.id.btnStartTracking)?.setBounceClickListener {
+                    startObjectTrackingRun()
+                }
+                toolbar.findViewById<ImageButton>(R.id.btnApplyTracking)?.setBounceClickListener {
+                    applyObjectTracking()
+                }
+                toolbar.findViewById<TextView>(R.id.tvZoomAuto)?.setBounceClickListener { selectTrackingZoom(0f) }
+                toolbar.findViewById<TextView>(R.id.tvZoom15)?.setBounceClickListener { selectTrackingZoom(1.5f) }
+                toolbar.findViewById<TextView>(R.id.tvZoom20)?.setBounceClickListener { selectTrackingZoom(2f) }
+                toolbar.findViewById<TextView>(R.id.tvZoom30)?.setBounceClickListener { selectTrackingZoom(3f) }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Tracking toolbar not found: ${e.message}")
+            null
+        }
+
+        objectTrackingOverlayView = try {
+            findViewById<com.tharunbirla.librecuts.customviews.ObjectTrackingOverlayView>(
+                R.id.objectTrackingOverlayView
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Tracking overlay not found: ${e.message}")
             null
         }
 
@@ -2302,6 +2345,7 @@ class VideoEditingActivity : AppCompatActivity() {
             imageOverlayView?.setVideoSize(canvasW.toInt(), canvasH.toInt())
             draggableImageOverlay?.setVideoSize(canvasW.toInt(), canvasH.toInt())
             cropOverlayView?.setVideoSize(canvasW.toInt(), canvasH.toInt())
+            objectTrackingOverlayView?.setVideoSize(canvasW.toInt(), canvasH.toInt())
         }
     }
 
@@ -2358,6 +2402,7 @@ class VideoEditingActivity : AppCompatActivity() {
             imageOverlayView?.setVideoSize(finalWidth, finalHeight)
             draggableImageOverlay?.setVideoSize(finalWidth, finalHeight)
             cropOverlayView?.setVideoSize(finalWidth, finalHeight)
+            objectTrackingOverlayView?.setVideoSize(finalWidth, finalHeight)
         }
     }
 
@@ -2796,6 +2841,273 @@ class VideoEditingActivity : AppCompatActivity() {
         enterTextEditingMode()
     }
 
+    // ── Object tracking mode ────────────────────────────────────────────────
+    // Its own mode: a resizable marker + a separate Start Tracking action. The result is a
+    // pan/zoom transform stored on the timeline; the frame size never changes.
+
+    /** Open the tracker for the selected clip: marker on the preview, nothing tracked yet. */
+    private fun enterTrackingEditingMode() {
+        val project = viewModel.project.value ?: return
+        closeActiveEditingModes()
+
+        val overlay = objectTrackingOverlayView ?: return
+        trackingPath = emptyList()
+        trackingZoom = 0f
+
+        // Keep the marker/track of an existing tracking operation, otherwise start centred.
+        val existing = project.operations
+            .filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.TrackObject>()
+            .lastOrNull()
+        if (existing != null && existing.hasPath()) {
+            overlay.setMarkerBounds(
+                existing.patternLeft,
+                existing.patternTop,
+                existing.patternWidth,
+                existing.patternHeight
+            )
+            trackingZoom = existing.zoom
+            trackingPath = existing.path
+            overlay.setTrajectory(existing.path.map { Pair(it.valueX, it.valueY) })
+        } else {
+            overlay.setMarkerBounds(0.3f, 0.3f, 0.4f, 0.4f)
+            overlay.clearTrajectory()
+        }
+
+        // The overlay draws in the same box as the previewed canvas.
+        findViewById<FrameLayout>(R.id.canvasContainer)?.let { container ->
+            if (container.width > 0 && container.height > 0) {
+                overlay.setVideoSize(container.width, container.height)
+            }
+        }
+
+        overlay.onMarkerChanged = { _, _, _, _ ->
+            // Moving the marker invalidates the previous track.
+            if (trackingPath.isNotEmpty()) {
+                trackingPath = emptyList()
+                overlay.clearTrajectory()
+                updateTrackingUi()
+            }
+        }
+        overlay.visibility = View.VISIBLE
+
+        trackingEditingToolbar?.visibility = View.VISIBLE
+        editingControlsWrapper.visibility = View.GONE
+        updateTrackingUi()
+    }
+
+    /** Leave the tracker without committing anything. */
+    private fun exitTrackingEditingMode() {
+        trackingEditingToolbar?.visibility = View.GONE
+        objectTrackingOverlayView?.onMarkerChanged = null
+        objectTrackingOverlayView?.visibility = View.GONE
+        editingControlsWrapper.visibility = View.VISIBLE
+    }
+
+    /** Refresh hint/status, the zoom row and the Apply button for the current state. */
+    private fun updateTrackingUi() {
+        val toolbar = trackingEditingToolbar ?: return
+        val status = toolbar.findViewById<TextView>(R.id.tvTrackingStatus)
+        val zoomRow = toolbar.findViewById<View>(R.id.zoomRow)
+        val apply = toolbar.findViewById<ImageButton>(R.id.btnApplyTracking)
+
+        val canApply = trackingPath.size >= 2
+        zoomRow?.visibility = if (canApply) View.VISIBLE else View.GONE
+        apply?.isEnabled = canApply
+        apply?.alpha = if (canApply) 1f else 0.4f
+
+        status?.text = if (canApply) {
+            val zoomLabel = if (trackingZoom <= 0f) {
+                "AUTO x" + String.format(java.util.Locale.US, "%.2f", autoZoomFor(trackingPath))
+            } else {
+                "x" + String.format(java.util.Locale.US, "%.1f", trackingZoom)
+            }
+            getString(R.string.tracking_status_tracked, trackingPath.size, trackingPath.size, zoomLabel) +
+                    "\n" + getString(R.string.tracking_status_retrack)
+        } else {
+            getString(R.string.tracking_hint_mark)
+        }
+        highlightZoomOption(toolbar)
+    }
+
+    private fun highlightZoomOption(toolbar: View) {
+        val selected = if (trackingZoom <= 0f) {
+            R.id.tvZoomAuto
+        } else when {
+            trackingZoom <= 1.6f -> R.id.tvZoom15
+            trackingZoom <= 2.1f -> R.id.tvZoom20
+            else -> R.id.tvZoom30
+        }
+        listOf(R.id.tvZoomAuto, R.id.tvZoom15, R.id.tvZoom20, R.id.tvZoom30).forEach { id ->
+            toolbar.findViewById<TextView>(id)?.setTextColor(
+                if (id == selected) getColor(R.color.activeTool) else getColor(R.color.toolTextInactive)
+            )
+        }
+    }
+
+    private fun selectTrackingZoom(zoom: Float) {
+        trackingZoom = zoom
+        updateTrackingUi()
+    }
+
+    /** Mirror of TrackObject.autoZoom() so the status label shows the same number. */
+    private fun autoZoomFor(
+        path: List<com.tharunbirla.librecuts.models.EditOperation.KeyframePoint>
+    ): Float {
+        if (path.size < 2) return 1f
+        var deviation = 0f
+        path.forEach { k ->
+            deviation = maxOf(deviation, Math.abs(k.valueX - 0.5f), Math.abs(k.valueY - 0.5f))
+        }
+        if (deviation <= 0.001f) return 1f
+        return (1f / (1f - 2f * deviation))
+            .coerceIn(1f, com.tharunbirla.librecuts.models.EditOperation.TrackObject.MAX_ZOOM)
+    }
+
+    /** Run the tracker over the selected clip and keep the path in canvas coordinates. */
+    private fun startObjectTrackingRun() {
+        if (trackingInProgress) return
+        val project = viewModel.project.value ?: return
+        val overlay = objectTrackingOverlayView ?: return
+        if (overlay.visibility != View.VISIBLE) return
+
+        // The marker lives in canvas space; the tracker works on the source clip, so map
+        // across the current crop (identity when the clip is not cropped).
+        val crop = project.operations
+            .filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Crop>()
+            .lastOrNull()
+        val cropX = crop?.xFraction ?: 0f
+        val cropY = crop?.yFraction ?: 0f
+        val cropW = (crop?.wFraction ?: 1f).coerceAtLeast(0.01f)
+        val cropH = (crop?.hFraction ?: 1f).coerceAtLeast(0.01f)
+
+        val marker = overlay.getMarkerBounds()
+        val selection = com.tharunbirla.librecuts.services.ObjectTrackingService.Selection(
+            left = cropX + marker[0] * cropW,
+            top = cropY + marker[1] * cropH,
+            width = marker[2] * cropW,
+            height = marker[3] * cropH
+        )
+
+        val videoUri = selectedClipUri(project) ?: return
+        val range = selectedClipTimeRange(project)
+
+        val progressDialog = ProgressDialog(this).apply {
+            setTitle(getString(R.string.tracking_title))
+            setMessage(getString(R.string.tracking_message))
+            setProgressStyle(ProgressDialog.STYLE_HORIZONTAL)
+            max = 100
+            setCancelable(false)
+            show()
+        }
+
+        trackingInProgress = true
+        lifecycleScope.launch {
+            val result = try {
+                com.tharunbirla.librecuts.services.ObjectTrackingService.track(
+                    context = this@VideoEditingActivity,
+                    request = com.tharunbirla.librecuts.services.ObjectTrackingService.Request(
+                        videoUri = videoUri,
+                        startTimeMs = range.first,
+                        endTimeMs = range.second,
+                        selection = selection
+                    )
+                ) { progress ->
+                    runOnUiThread {
+                        progressDialog.progress = (progress * 100f).toInt().coerceIn(0, 100)
+                    }
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                Log.w(TAG, "Object tracking failed: ${e.message}")
+                com.tharunbirla.librecuts.services.ObjectTrackingService.Result(
+                    emptyList(), 0, 0, 0f
+                )
+            } finally {
+                progressDialog.dismiss()
+                trackingInProgress = false
+            }
+
+            if (result.isEmpty) {
+                Toast.makeText(
+                    this@VideoEditingActivity,
+                    R.string.tracking_failed,
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+
+            // Tracker returns source-relative centres; convert back into canvas space.
+            trackingPath = result.path.map { point ->
+                point.copy(
+                    valueX = ((point.valueX - cropX) / cropW).coerceIn(0f, 1f),
+                    valueY = ((point.valueY - cropY) / cropH).coerceIn(0f, 1f)
+                )
+            }
+            objectTrackingOverlayView?.setTrajectory(trackingPath.map { Pair(it.valueX, it.valueY) })
+            updateTrackingUi()
+        }
+    }
+
+    /** Commit the track to the timeline, then return to the main toolbar. */
+    private fun applyObjectTracking() {
+        if (trackingPath.size < 2) return
+        val overlay = objectTrackingOverlayView ?: return
+        val marker = overlay.getMarkerBounds()
+
+        viewModel.addTrackObjectOperation(
+            com.tharunbirla.librecuts.models.EditOperation.TrackObject(
+                patternLeft = marker[0],
+                patternTop = marker[1],
+                patternWidth = marker[2],
+                patternHeight = marker[3],
+                path = trackingPath,
+                zoom = trackingZoom
+            )
+        )
+        exitTrackingEditingMode()
+        Toast.makeText(this, R.string.tracking_applied, Toast.LENGTH_SHORT).show()
+    }
+
+    /** Source URI backing the selected clip (base video, or the merged item). */
+    private fun selectedClipUri(project: com.tharunbirla.librecuts.models.VideoProject): Uri? {
+        val index = selectedVideoIndex ?: 0
+        val merge = project.operations
+            .filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Merge>()
+            .lastOrNull()
+        return if (merge != null && index in 1..merge.items.size) {
+            merge.items[index - 1].uri
+        } else {
+            project.sourceUri
+        }
+    }
+
+    /**
+     * Timeline range of the selected clip, in milliseconds.
+     *
+     * Phase 1 approximation: the base clip length is taken from the player, and merged
+     * clips are measured from the merged items' trimmed durations.
+     */
+    private fun selectedClipTimeRange(
+        project: com.tharunbirla.librecuts.models.VideoProject
+    ): Pair<Long, Long> {
+        val playerDuration = if (::player.isInitialized) player.duration.coerceAtLeast(0L) else 0L
+        val safeDuration = if (playerDuration > 0L) playerDuration else 30_000L
+        val index = selectedVideoIndex ?: 0
+        val merge = project.operations
+            .filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.Merge>()
+            .lastOrNull()
+        if (merge == null || index !in 1..merge.items.size) {
+            return Pair(0L, safeDuration)
+        }
+        var startMs = 0L
+        for (i in 0 until index - 1) {
+            startMs += merge.items[i].trimmedDurationMs
+        }
+        val endMs = (startMs + merge.items[index - 1].trimmedDurationMs).coerceAtMost(safeDuration)
+        return Pair(startMs, endMs)
+    }
+
     private fun closeActiveEditingModes() {
         if (isHandwritingActive) {
             closeHandwritingMode()
@@ -2818,6 +3130,9 @@ class VideoEditingActivity : AppCompatActivity() {
         cropEditingToolbar?.visibility = View.GONE
         subtitlesEditingToolbar?.visibility = View.GONE
         backgroundEditingToolbar?.visibility = View.GONE
+        // Object tracking mode (own toolbar + overlay).
+        trackingEditingToolbar?.visibility = View.GONE
+        objectTrackingOverlayView?.visibility = View.GONE
     }
 
     private fun enterTextEditingMode(isReEditing: Boolean = false) {

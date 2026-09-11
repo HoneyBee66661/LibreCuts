@@ -632,7 +632,57 @@ class VideoEditingViewModel : ViewModel() {
             }
         }
 
+        // Object tracking runs last: it pans/zooms the finished canvas so the tracked
+        // subject stays centred. Unlike crop it never changes the output size.
+        for (op in operations.filterIsInstance<EditOperation.TrackObject>()) {
+            val transformExpr = buildTrackingTransformExpr(op)
+            if (transformExpr != null) {
+                val nextLabel = "[v$stageIndex]"
+                stages.add("$currentLabel$transformExpr$nextLabel")
+                currentLabel = nextLabel
+                stageIndex++
+            }
+        }
+
         return Pair(stages, currentLabel)
+    }
+
+    /**
+     * Build the pan/zoom transform for a tracked clip.
+     *
+     * The window is a FULL-CANVAS view of the clip, so the output size is unchanged and
+     * the canvas is never cut — the transform is pan (x/y as time expressions) plus,
+     * when the subject strays far from the centre, zoom. x/y are clamped so the window
+     * can never leave the scaled clip, which is what keeps black bars out.
+     */
+    private fun buildTrackingTransformExpr(op: EditOperation.TrackObject): String? {
+        if (!op.hasPath()) return null
+        val zoom = op.appliedZoom().coerceIn(1f, EditOperation.TrackObject.MAX_ZOOM)
+        // At zoom 1.0 the window already fills the frame, so there is nothing to pan.
+        if (zoom <= 1.001f) return null
+
+        val cxExpr = buildFFmpegInterpolationExpr(
+            op.path,
+            useValueY = false,
+            defaultValue = 0.5f,
+            startTimeMs = 0L,
+            timeVar = "t"
+        )
+        val cyExpr = buildFFmpegInterpolationExpr(
+            op.path,
+            useValueY = true,
+            defaultValue = 0.5f,
+            startTimeMs = 0L,
+            timeVar = "t"
+        )
+        // After scaling by `zoom`, a full-canvas window is iw/zoom of the scaled frame.
+        val w = String.format(java.util.Locale.US, "trunc(iw/%.4f/2)*2", zoom)
+        val h = String.format(java.util.Locale.US, "trunc(ih/%.4f/2)*2", zoom)
+        val x = "clip(($cxExpr)*iw-($w)/2\\,0\\,iw-($w))"
+        val y = "clip(($cyExpr)*ih-($h)/2\\,0\\,ih-($h))"
+        val scaledW = String.format(java.util.Locale.US, "trunc(iw*%.4f/2)*2", zoom)
+        val scaledH = String.format(java.util.Locale.US, "trunc(ih*%.4f/2)*2", zoom)
+        return "scale=$scaledW:$scaledH,crop=w=$w:h=$h:x='$x':y='$y',setsar=1"
     }
 
     /**

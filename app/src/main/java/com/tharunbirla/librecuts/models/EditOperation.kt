@@ -84,6 +84,89 @@ sealed class EditOperation : Serializable {
         val interpolationType: String = "linear"
     ) : Serializable
 
+    /**
+     * Object tracking (DaVinci-Resolve-style tracker, simplified).
+     *
+     * The user marks the subject with a resizable rectangle; the tracker records that
+     * subject's centre through the clip; on export the clip is panned (and, if needed,
+     * zoomed) so the subject stays in the middle of the frame.
+     *
+     * This is NOT a crop: the output size never changes and the canvas is never cut.
+     * The frame is transformed inside its existing bounds — the window is a full-canvas
+     * view of the clip, so keeping the subject centred is pure pan + zoom.
+     */
+    data class TrackObject(
+        /** Marker rectangle, relative to the display-oriented frame (0..1). */
+        val patternLeft: Float,
+        val patternTop: Float,
+        val patternWidth: Float,
+        val patternHeight: Float,
+        /** Subject centre (relative 0..1) sampled over the clip's timeline. */
+        val path: List<KeyframePoint>,
+        /** 0 = auto (smallest zoom that keeps the canvas covered), else a fixed 1.0..3.0. */
+        val zoom: Float = 0f,
+        val id: String = System.nanoTime().toString()
+    ) : EditOperation() {
+
+        companion object {
+            const val MAX_ZOOM = 3f
+        }
+
+        /** Null-safe: projects saved before this op existed deserialize `path` as null. */
+        fun hasPath(): Boolean {
+            val p: List<KeyframePoint>? = path
+            return p != null && p.size >= 2
+        }
+
+        /** Interpolated subject centre at [timeMs] (project timeline), relative coords. */
+        fun centerAt(timeMs: Long): Pair<Float, Float> {
+            val p: List<KeyframePoint>? = path
+            if (p.isNullOrEmpty()) {
+                return Pair(patternLeft + patternWidth / 2f, patternTop + patternHeight / 2f)
+            }
+            val sorted = p.sortedBy { it.timeMs }
+            if (timeMs <= sorted.first().timeMs) return Pair(sorted.first().valueX, sorted.first().valueY)
+            if (timeMs >= sorted.last().timeMs) return Pair(sorted.last().valueX, sorted.last().valueY)
+            for (i in 0 until sorted.size - 1) {
+                val k1 = sorted[i]
+                val k2 = sorted[i + 1]
+                if (timeMs >= k1.timeMs && timeMs <= k2.timeMs) {
+                    val progress = (timeMs - k1.timeMs).toFloat() / (k2.timeMs - k1.timeMs).toFloat()
+                    return Pair(
+                        k1.valueX + progress * (k2.valueX - k1.valueX),
+                        k1.valueY + progress * (k2.valueY - k1.valueY)
+                    )
+                }
+            }
+            return Pair(sorted.last().valueX, sorted.last().valueY)
+        }
+
+        /**
+         * Smallest zoom at which a canvas-sized window can follow [path] without ever
+         * leaving the scaled clip (no black bars, no cut canvas).
+         *
+         * A frame scaled by S can pan +-(S-1)/2 of its width, so a subject that strays
+         * `d` (relative) from the centre needs S >= 1 / (1 - 2d). Each axis is clamped
+         * independently by the render code, so the larger of the two demands wins.
+         */
+        fun autoZoom(): Float {
+            if (!hasPath()) return 1f
+            var dx = 0f
+            var dy = 0f
+            val p: List<KeyframePoint>? = path
+            p?.forEach { k ->
+                dx = maxOf(dx, kotlin.math.abs(k.valueX - 0.5f))
+                dy = maxOf(dy, kotlin.math.abs(k.valueY - 0.5f))
+            }
+            val deviation = maxOf(dx, dy)
+            if (deviation <= 0.001f) return 1f
+            return (1f / (1f - 2f * deviation)).coerceIn(1f, MAX_ZOOM)
+        }
+
+        /** Zoom actually used at render time: the manual value, or the auto-derived one. */
+        fun appliedZoom(): Float = if (zoom <= 0f) autoZoom() else zoom.coerceIn(1f, MAX_ZOOM)
+    }
+
     data class AddText(
         val text: String,
         val fontSize: Int,
@@ -475,6 +558,7 @@ val EditOperation.id: String
         is EditOperation.MirrorMain -> id
         is EditOperation.MaskMain -> id
         is EditOperation.Crop -> id
+        is EditOperation.TrackObject -> id
         is EditOperation.AddText -> id
         is EditOperation.Merge -> id
         is EditOperation.MuteAudio -> id
