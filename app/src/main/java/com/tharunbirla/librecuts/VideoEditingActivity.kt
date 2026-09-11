@@ -8822,6 +8822,10 @@ class VideoEditingActivity : AppCompatActivity() {
      * orientation: it centres itself in whatever space exists, scrolls its own message, and keeps
      * both buttons on screen in portrait and landscape alike.
      *
+     * The wording follows the Office "save before exit" prompt on purpose: users have answered
+     * that exact question thousands of times, so the first sentence is the question and the
+     * second names the consequence of the wrong answer.
+     *
      * Yes → save the project (same path as the editor's Save Project action) and then go home.
      * No  → go home immediately, without saving.
      */
@@ -8832,8 +8836,11 @@ class VideoEditingActivity : AppCompatActivity() {
         }
 
         MaterialAlertDialogBuilder(this)
-            .setTitle("Save the project before exit?")
-            .setMessage("Yes saves your project and takes you home. No leaves without saving your edits.")
+            .setTitle("Exit")
+            .setMessage(
+                "Do you want to save your changes?\n\n" +
+                        "Your changes will be lost if you don't save them."
+            )
             .setPositiveButton("Yes") { _, _ ->
                 shouldQuitAfterSave = true
                 saveProjectLauncher.launch("project.lcprj")
