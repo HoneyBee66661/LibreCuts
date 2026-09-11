@@ -40,7 +40,8 @@ jobs:
           VARIANT="${{ inputs.variant }}"
           [ -z "$VARIANT" ] && VARIANT="debug"
           echo "Building variant: $VARIANT"
-          ./gradlew "assemble${VARIANT^}" --no-daemon
+          ./gradlew "assemble${VARIANT^}" --no-daemon \
+            -Pandroid.injected.build.abi=arm64-v8a   # HP arm64 saja -> artifact kecil
 
       - name: List APK hasil build
         run: find app/build/outputs/apk -name '*.apk' -exec ls -lh {} \;
