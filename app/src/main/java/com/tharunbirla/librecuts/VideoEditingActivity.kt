@@ -531,7 +531,11 @@ class VideoEditingActivity : AppCompatActivity() {
     private val saveProjectLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri: Uri? ->
-        if (uri != null) {
+        if (uri == null) {
+            // User backed out of the save picker: forget the pending quit, otherwise a later
+            // successful save (e.g. the editor's own Save Project action) would close the editor.
+            shouldQuitAfterSave = false
+        } else {
             try {
                 val project = viewModel.project.value
                 if (project != null) {
@@ -546,8 +550,12 @@ class VideoEditingActivity : AppCompatActivity() {
                         shouldQuitAfterSave = false
                         finish()
                     }
+                } else {
+                    shouldQuitAfterSave = false
                 }
             } catch (e: Exception) {
+                // Stay in the editor: a failed save must never be followed by an exit.
+                shouldQuitAfterSave = false
                 Log.e(TAG, "Failed to save project", e)
                 Toast.makeText(this, "Failed to save project", Toast.LENGTH_SHORT).show()
             }
@@ -8657,32 +8665,37 @@ class VideoEditingActivity : AppCompatActivity() {
         bottomSheet.show()
     }
 
+    /**
+     * Exit prompt for edit mode.
+     *
+     * Deliberately a plain [MaterialAlertDialogBuilder] instead of a BottomSheetDialog. A
+     * BottomSheetDialog has no scroll container of its own, so the old sheet's fixed-height stack
+     * (header + three buttons) sank below the visible area in landscape, where the editor only has
+     * ~300-360dp of usable height — the user reported the exit action as "tenggelam" and could only
+     * reach it by scrolling. An AlertDialog has no layout of its own to keep in sync with the
+     * orientation: it centres itself in whatever space exists, scrolls its own message, and keeps
+     * both buttons on screen in portrait and landscape alike.
+     *
+     * Yes → save the project (same path as the editor's Save Project action) and then go home.
+     * No  → go home immediately, without saving.
+     */
     private fun showQuitConfirmationDialog() {
         if (!viewModel.hasUnsavedEdits.value) {
             finish()
             return
         }
 
-        val bottomSheet = com.google.android.material.bottomsheet.BottomSheetDialog(this)
-        val view = layoutInflater.inflate(R.layout.dialog_unsaved_changes, null)
-
-        view.findViewById<com.google.android.material.button.MaterialButton>(R.id.btnSaveAndQuit).setBounceClickListener {
-            bottomSheet.dismiss()
-            shouldQuitAfterSave = true
-            saveProjectLauncher.launch("project.lcprj")
-        }
-
-        view.findViewById<com.google.android.material.button.MaterialButton>(R.id.btnKeepEditing).setBounceClickListener {
-            bottomSheet.dismiss()
-        }
-
-        view.findViewById<com.google.android.material.button.MaterialButton>(R.id.btnDiscard).setBounceClickListener {
-            bottomSheet.dismiss()
-            finish()
-        }
-
-        bottomSheet.setContentView(view)
-        bottomSheet.show()
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Save the project before exit?")
+            .setMessage("Yes saves your project and takes you home. No leaves without saving your edits.")
+            .setPositiveButton("Yes") { _, _ ->
+                shouldQuitAfterSave = true
+                saveProjectLauncher.launch("project.lcprj")
+            }
+            .setNegativeButton("No") { _, _ ->
+                finish()
+            }
+            .show()
     }
 
     private fun getSnapTargetsMs(): List<Long> {
