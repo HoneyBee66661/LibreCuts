@@ -424,7 +424,8 @@ class VideoEditingViewModel : ViewModel() {
         inputLabel: String = "[0:v]",
         imageInputIndices: List<Pair<Int, EditOperation.AddImageOverlay>> = emptyList(),
         density: Float = 1.0f,
-        sourceVideoHeight: Int = 1080
+        sourceVideoHeight: Int = 1080,
+        sourceVideoWidth: Int = 1920
     ): Pair<List<String>, String> {
         val stages = mutableListOf<String>()
         var currentLabel = inputLabel
@@ -632,10 +633,25 @@ class VideoEditingViewModel : ViewModel() {
             }
         }
 
-        // Object tracking runs last: it pans/zooms the finished canvas so the tracked
-        // subject stays centred. Unlike crop it never changes the output size.
+        // Reframe runs last: it pans/zooms the finished canvas so the tracked subject sits
+        // where the chosen ratio wants it. Unlike crop it never changes the canvas size of
+        // the stream it is applied to, so nothing is ever cut off or letterboxed.
+        //
+        // The window is sized against the *effective* frame — the frame as it looks after
+        // any crop stage above — because the filter sees post-crop pixels, not the raw file.
+        val cropForSize = cropOps.lastOrNull()
+        val effectiveWidth = if (cropForSize != null) {
+            (sourceVideoWidth * cropForSize.wFraction).toInt().coerceAtLeast(2)
+        } else {
+            sourceVideoWidth.coerceAtLeast(2)
+        }
+        val effectiveHeight = if (cropForSize != null) {
+            (sourceVideoHeight * cropForSize.hFraction).toInt().coerceAtLeast(2)
+        } else {
+            sourceVideoHeight.coerceAtLeast(2)
+        }
         for (op in operations.filterIsInstance<EditOperation.TrackObject>()) {
-            val transformExpr = buildTrackingTransformExpr(op)
+            val transformExpr = buildReframeStage(op, effectiveWidth, effectiveHeight)
             if (transformExpr != null) {
                 val nextLabel = "[v$stageIndex]"
                 stages.add("$currentLabel$transformExpr$nextLabel")
@@ -648,41 +664,41 @@ class VideoEditingViewModel : ViewModel() {
     }
 
     /**
-     * Build the pan/zoom transform for a tracked clip.
+     * Build the reframe (pan/zoom) stage for a tracking operation.
      *
-     * The window is a FULL-CANVAS view of the clip, so the output size is unchanged and
-     * the canvas is never cut — the transform is pan (x/y as time expressions) plus,
-     * when the subject strays far from the centre, zoom. x/y are clamped so the window
-     * can never leave the scaled clip, which is what keeps black bars out.
+     * The decision of *how* the frame should move is not made here: this converts the
+     * stored track into the reframe module's own coordinates, asks
+     * [ReframePlanner] for a plan and lets [ReframeFilterBuilder] write the filter. Keeping
+     * the maths out of the ViewModel is what lets the tracker be replaced without touching
+     * the render pipeline, and vice versa.
      */
-    private fun buildTrackingTransformExpr(op: EditOperation.TrackObject): String? {
+    private fun buildReframeStage(
+        op: EditOperation.TrackObject,
+        sourceWidth: Int,
+        sourceHeight: Int
+    ): String? {
         if (!op.hasPath()) return null
-        val zoom = op.appliedZoom().coerceIn(1f, EditOperation.TrackObject.MAX_ZOOM)
-        // At zoom 1.0 the window already fills the frame, so there is nothing to pan.
-        if (zoom <= 1.001f) return null
+        val storedPath: List<EditOperation.KeyframePoint>? = op.path
+        if (storedPath == null || storedPath.size < 2) return null
 
-        val cxExpr = buildFFmpegInterpolationExpr(
-            op.path,
-            useValueY = false,
-            defaultValue = 0.5f,
-            startTimeMs = 0L,
-            timeVar = "t"
+        // A manual zoom (the x1.5/x2/x3 controls) overrides the spec's auto zoom.
+        val baseSpec = op.reframeSpec()
+        val spec = if (op.zoom > 0f) baseSpec.copy(zoom = op.zoom) else baseSpec
+
+        val keyframes = storedPath.map {
+            com.tharunbirla.librecuts.services.reframe.ReframeKeyframe(it.timeMs, it.valueX, it.valueY)
+        }
+        val plan = com.tharunbirla.librecuts.services.reframe.ReframePlanner.plan(
+            sourceWidth = sourceWidth,
+            sourceHeight = sourceHeight,
+            spec = spec,
+            keyframes = keyframes
         )
-        val cyExpr = buildFFmpegInterpolationExpr(
-            op.path,
-            useValueY = true,
-            defaultValue = 0.5f,
-            startTimeMs = 0L,
-            timeVar = "t"
-        )
-        // After scaling by `zoom`, a full-canvas window is iw/zoom of the scaled frame.
-        val w = String.format(java.util.Locale.US, "trunc(iw/%.4f/2)*2", zoom)
-        val h = String.format(java.util.Locale.US, "trunc(ih/%.4f/2)*2", zoom)
-        val x = "clip(($cxExpr)*iw-($w)/2\\,0\\,iw-($w))"
-        val y = "clip(($cyExpr)*ih-($h)/2\\,0\\,ih-($h))"
-        val scaledW = String.format(java.util.Locale.US, "trunc(iw*%.4f/2)*2", zoom)
-        val scaledH = String.format(java.util.Locale.US, "trunc(ih*%.4f/2)*2", zoom)
-        return "scale=$scaledW:$scaledH,crop=w=$w:h=$h:x='$x':y='$y',setsar=1"
+        val stage = com.tharunbirla.librecuts.services.reframe.ReframeFilterBuilder.build(plan)
+        if (stage != null) {
+            Log.d(TAG, "Reframe stage: ${plan.describe()} -> $stage")
+        }
+        return stage
     }
 
     /**
@@ -768,7 +784,7 @@ class VideoEditingViewModel : ViewModel() {
         val trimOp = operations.filterIsInstance<EditOperation.Trim>().lastOrNull()
         val audioOps = operations.filterIsInstance<EditOperation.AddBackgroundAudio>()
         val audioMuted = operations.any { it is EditOperation.MuteAudio }
-        val videoOps = nonMergeOps.filter { it is EditOperation.Crop || it is EditOperation.AddText || it is EditOperation.AddImageOverlay || it is EditOperation.AddSubtitles }
+        val videoOps = nonMergeOps.filter { it is EditOperation.Crop || it is EditOperation.AddText || it is EditOperation.AddImageOverlay || it is EditOperation.AddSubtitles || it is EditOperation.TrackObject }
         val imageOps = operations.filterIsInstance<EditOperation.AddImageOverlay>()
 
         // ── Unified Input Indexing ────────────────────────────────────────────
@@ -1216,7 +1232,8 @@ class VideoEditingViewModel : ViewModel() {
                 inputLabel = currentVideoLabel,
                 imageInputIndices = imageInputIndices,
                 density = density,
-                sourceVideoHeight = sourceVideoHeight
+                sourceVideoHeight = sourceVideoHeight,
+                sourceVideoWidth = sourceVideoWidth
             )
             filterParts.addAll(sourceVideoStages)
             val finalVideoLabel = "[fmtv]"
@@ -1437,7 +1454,8 @@ class VideoEditingViewModel : ViewModel() {
             inputLabel = currentInputVideoLabel,
             imageInputIndices = imageInputIndices,
             density = density,
-            sourceVideoHeight = sourceVideoHeight
+            sourceVideoHeight = sourceVideoHeight,
+            sourceVideoWidth = sourceVideoWidth
         )
         filterComplexParts.addAll(videoStages)
 
@@ -1635,11 +1653,14 @@ class VideoEditingViewModel : ViewModel() {
     }
 
     /**
-     * Build an FFmpeg command for a fast 3-second preview around the playhead.
-     * Uses ultrafast preset and high CRF for speed over quality.
+     * Build an FFmpeg command for a fast, low-bitrate preview of the main clip.
+     * Uses ultrafast settings and a modest bitrate for speed over quality.
      * Skips merge operations (preview is source-only).
      *
-     * @param seekPositionMs  Current playhead position in ms.
+     * Note: the command covers the whole trimmed clip, not a window around the playhead —
+     * [seekPositionMs] is kept for the caller's progress UI. That matters for reframe: the
+     * pan/zoom keyframes are keyed to clip time, so the preview must start at the clip start
+     * for the transform to line up.
      */
     fun buildPreviewCommand(
         sourceFilePath: String,
@@ -1652,11 +1673,17 @@ class VideoEditingViewModel : ViewModel() {
         val operations = currentProject.operations
             .filterNot { it is EditOperation.Merge } // Skip merge for preview
 
-        if (operations.none { it is EditOperation.Crop || it is EditOperation.AddText || it is EditOperation.AddSubtitles }) {
+        if (operations.none {
+                it is EditOperation.Crop || it is EditOperation.AddText ||
+                        it is EditOperation.AddSubtitles || it is EditOperation.TrackObject
+            }) {
             return null // No visual operations to preview
         }
 
-        val videoOps = operations.filter { it is EditOperation.Crop || it is EditOperation.AddText || it is EditOperation.AddSubtitles }
+        val videoOps = operations.filter {
+            it is EditOperation.Crop || it is EditOperation.AddText ||
+                    it is EditOperation.AddSubtitles || it is EditOperation.TrackObject
+        }
         val trimOp = operations.filterIsInstance<EditOperation.Trim>().lastOrNull()
 
         val cmd = StringBuilder()
@@ -1669,12 +1696,15 @@ class VideoEditingViewModel : ViewModel() {
             cmd.append("-i \"$sourceFilePath\"")
         }
 
-        // Build filter_complex for video operations
+        // Build filter_complex for video operations. Real source dimensions matter here:
+        // the reframe window is a fraction of the frame, and it is sized from these.
+        val (probeWidth, probeHeight) = probeVideoSize(sourceFilePath)
         val (videoStages, finalLabel) = buildVideoFilterStages(
             operations = videoOps,
             fontFilePath = fontFilePath,
             density = density,
-            sourceVideoHeight = 1080
+            sourceVideoHeight = probeHeight,
+            sourceVideoWidth = probeWidth
         )
         if (videoStages.isNotEmpty()) {
             cmd.append(" -filter_complex \"${videoStages.joinToString(";")}\"")
@@ -1691,6 +1721,37 @@ class VideoEditingViewModel : ViewModel() {
         val finalCommand = cmd.toString()
         Log.d(TAG, "Built preview command: $finalCommand")
         return finalCommand
+    }
+
+    /**
+     * Display-oriented dimensions of a video file, for sizing the reframe window.
+     *
+     * Rotation is taken into account because the frame the filter sees is the rotated one.
+     * Falls back to 1920x1080 when the file cannot be probed, which only risks a slightly
+     * odd zoom, never a crash.
+     */
+    private fun probeVideoSize(sourceFilePath: String): Pair<Int, Int> {
+        return try {
+            val retriever = android.media.MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(sourceFilePath)
+                val w = retriever
+                    .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                    ?.toIntOrNull() ?: 1920
+                val h = retriever
+                    .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                    ?.toIntOrNull() ?: 1080
+                val rotation = retriever
+                    .extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                    ?.toIntOrNull() ?: 0
+                if (rotation == 90 || rotation == 270) Pair(h, w) else Pair(w, h)
+            } finally {
+                retriever.release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not probe video size for reframe: ${e.message}")
+            Pair(1920, 1080)
+        }
     }
 
     private fun copyContentUriToTempFile(context: Context, uri: Uri): String? {

@@ -82,6 +82,14 @@
     <string name="tracking_failed">Could not follow the object. Try a tighter box or a shorter range.</string>
     <string name="tracking_applied">Tracking applied — the object stays centered.</string>
     <string name="tracking_select_clip">Select a clip on the timeline first.</string>
+    <string name="reframe_ratio_title">Output ratio</string>
+    <string name="reframe_ratio_tiktok">TikTok 9:16 — pan sideways, height locked</string>
+    <string name="reframe_ratio_youtube">YouTube 16:9 — zoom and pan follow</string>
+    <string name="reframe_ratio_original">Keep original ratio</string>
+    <string name="reframe_applied">Reframe applied — %1$s</string>
+    <string name="reframe_rendering">Applying reframe to the timeline…</string>
+    <string name="reframe_failed">Could not apply the reframe to the timeline. The export will still use it.</string>
+    <string name="reframe_preview_only">Clip is long, so only the preview shows the reframe — export still applies it.</string>
     <string name="str_16_9">16:9</string>
     <string name="str_9_16">9:16</string>
     <string name="str_1_1">1:1</string>

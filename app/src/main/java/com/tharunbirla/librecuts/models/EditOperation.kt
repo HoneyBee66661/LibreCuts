@@ -81,8 +81,20 @@ sealed class EditOperation : Serializable {
         val timeMs: Long,
         val valueX: Float,
         val valueY: Float = 0f,
-        val interpolationType: String = "linear"
-    ) : Serializable
+        val interpolationType: String = "linear",
+        /**
+         * Tracker confidence for this sample (0 = the subject was lost and the position was
+         * bridged between two confident samples, 1 = a clean match).
+         *
+         * Gson builds objects without running Kotlin defaults, so a project saved before
+         * this field existed deserializes it as 0f; read it through
+         * [effectiveConfidence] rather than directly.
+         */
+        val confidence: Float = 1f
+    ) : Serializable {
+        /** Confidence to act on: 0 means "unknown" for paths saved by older builds. */
+        val effectiveConfidence: Float get() = if (confidence <= 0f) 1f else confidence
+    }
 
     /**
      * Object tracking (DaVinci-Resolve-style tracker, simplified).
@@ -105,12 +117,23 @@ sealed class EditOperation : Serializable {
         val path: List<KeyframePoint>,
         /** 0 = auto (smallest zoom that keeps the canvas covered), else a fixed 1.0..3.0. */
         val zoom: Float = 0f,
+        /**
+         * Framing decision for this track (ratio, pan/zoom mode). Null on projects saved
+         * before the reframe presets existed — read it through [reframeSpec].
+         */
+        val spec: ReframeSpec? = null,
         val id: String = System.nanoTime().toString()
     ) : EditOperation() {
 
         companion object {
             const val MAX_ZOOM = 3f
         }
+
+        /**
+         * The framing to apply, defaulting to the source canvas with an auto zoom/pan —
+         * exactly the behaviour of the very first tracking builds.
+         */
+        fun reframeSpec(): ReframeSpec = spec ?: ReframeSpec.ORIGINAL
 
         /** Null-safe: projects saved before this op existed deserialize `path` as null. */
         fun hasPath(): Boolean {
@@ -312,6 +335,14 @@ sealed class EditOperation : Serializable {
         val speed: Float = 1.0f,
         val proxyUri: Uri? = null,
         val scrubProxyUri: Uri? = null,
+        /**
+         * Playback-only proxy of this clip with the reframe (pan/zoom) already baked in.
+         *
+         * It exists so applying a reframe is visible on the timeline immediately instead of
+         * only after export. Export deliberately ignores it and re-applies the filter to the
+         * original source, so the transform is never applied twice.
+         */
+        val reframeProxyUri: Uri? = null,
         val isReversed: Boolean = false,
         val isMirrored: Boolean = false,
         val maskConfig: MaskConfig = MaskConfig(),

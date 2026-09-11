@@ -11,11 +11,53 @@ fun VideoEditingViewModel.updateMainVideoTrim(startMs: Long, endMs: Long) {
 }
 
 fun VideoEditingViewModel.updateMainVideoSpeed(speed: Float, proxyUri: Uri?) {
-    executeCommand(ReplaceUniqueOperationCommand(EditOperation.SpeedMain(speed, proxyUri), "Change Speed"))
+    executeCommand(
+        ReplaceUniqueOperationCommand(
+            EditOperation.SpeedMain(speed, proxyUri),
+            "Change Speed",
+            invalidatesReframeProxy = true
+        )
+    )
 }
 
 fun VideoEditingViewModel.updateMainVideoReverse(isReversed: Boolean, proxyUri: Uri?) {
-    executeCommand(ReplaceUniqueOperationCommand(EditOperation.ReverseMain(isReversed, proxyUri), "Reverse Video"))
+    executeCommand(
+        ReplaceUniqueOperationCommand(
+            EditOperation.ReverseMain(isReversed, proxyUri),
+            "Reverse Video",
+            invalidatesReframeProxy = true
+        )
+    )
+}
+
+/**
+ * Store the playback-only reframe proxy for a clip.
+ *
+ * [index] 0 is the main clip (kept on the project), anything else is a merged item. The
+ * proxy is never written to disk with the project — it is a cache that makes the reframe
+ * visible on the timeline without re-encoding on every scrub.
+ */
+fun VideoEditingViewModel.setReframeProxyUri(index: Int, proxyUri: Uri?) {
+    executeCommand(MutateProjectCommand("Reframe Proxy") { project ->
+        if (index <= 0) {
+            project.copy(reframeProxyUri = proxyUri)
+        } else {
+            val ops = project.operations.toMutableList()
+            val mergeIdx = ops.indexOfFirst { it is EditOperation.Merge }
+            if (mergeIdx == -1) {
+                project
+            } else {
+                val mergeOp = ops[mergeIdx] as EditOperation.Merge
+                val items = mergeOp.items.toMutableList()
+                val target = index - 1
+                if (target in items.indices) {
+                    items[target] = items[target].copy(reframeProxyUri = proxyUri)
+                    ops[mergeIdx] = mergeOp.copy(items = items)
+                }
+                project.copy(operations = ops)
+            }
+        }
+    })
 }
 
 fun VideoEditingViewModel.updateMainVideoMirror(isMirrored: Boolean) {
